@@ -418,15 +418,19 @@ knobs 20 10
 # run_timeout's command, a `&` subshell, and a non-interactive shell hands those SIGINT and SIGQUIT
 # ignored -- so the key that ended the launcher left that subshell asking podman until the deadline.
 # The launcher must die of SIGNAL, and nothing may be left in its process group 3 s later. With HUNG,
-# the key waits until that call of podman-fake's has hung.
-key_while_waiting() {                 # key_while_waiting CASE KEY SIGNAL [HUNG]
-    local case="$1" key="$2" sig="$3" hung="${4:-}" g
+# the key waits until that call of podman-fake's has hung. KEY -KILL is no key but a force-quit: a
+# SIGKILL to the launcher alone, sent only while fgjob has reported no ending, so the pid is still its.
+key_while_waiting() {                 # key_while_waiting CASE KEY|-KILL SIGNAL [HUNG]
+    local case="$1" key="$2" sig="$3" hung="${4:-}" g p
     mac starting
     [ -n "$hung" ] && shim_set info_hang_at 2
     launcher_fg_start
     if launcher_fg_wait 15 "$WAITING" && { [ -z "$hung" ] || wait_until 15 test -s "$SHIM/$hung"; }; then
         g="$(launcher_fg_pgid)"
-        launcher_fg_keys "$key"
+        case "$key" in
+            -KILL) p="$(launcher_fg_pid)" && [ -z "$(launcher_fg_status)" ] && kill -KILL "$p" ;;
+            *)     launcher_fg_keys "$key" ;;
+        esac
         launcher_fg_ended 10
         assert_eq "$case:the-key-landed" "signal $sig" "$(launcher_fg_status)"
         if wait_until 3 pgid_empty "$g"; then pass "$case:leaves-nothing-asking-podman"
@@ -446,10 +450,32 @@ key_while_waiting() {                 # key_while_waiting CASE KEY SIGNAL [HUNG]
 # is preflight's own `info`; call 2 is the wait's first probe. (A Ctrl-C with no probe hung is this
 # with the kill and the check both able to end it, so it measured neither and was dropped.)
 key_while_waiting c5:ctrl-c-during-a-hung-probe '\003' 2 info_hung.pid
-# Ctrl-\ WHILE WAITING. A QUIT runs no EXIT trap -- bash 3.2 and 5 both die of it outright -- so
-# launcher_exit never runs, and machine_answer_by's own check for a vanished launcher is all that
-# ends the poller (#600).
-key_while_waiting c5b:ctrl-backslash-while-waiting '\034' 3
+# Ctrl-\ WHILE WAITING. A bash that dies of a QUIT runs no EXIT trap, so launcher_exit never runs, and
+# machine_answer_by's own check for a vanished launcher is all that ends the poller (#600).
+#
+# ONLY WHERE bash DOES DIE OF IT. Upstream bash ignores SIGQUIT in every shell it starts -- sig.c's
+# initialize_shell_signals, 3.2.57 and 5.3 alike -- so on Linux a Ctrl-\ never ends the launcher, and
+# the poller is right to go on. Apple's /bin/bash dies of it. Measured, `bash -c 'kill -QUIT $$'`:
+# rc 131 on macOS's 3.2.57, survived on Ubuntu's 5.1, 5.2 and 5.3. Asked of the `bash` on the
+# launcher's PATH, which its `env bash` finds, and THROUGH fgjob, which starts it with QUIT at default
+# as it does the launcher: this suite may have inherited QUIT ignored, and a probe that did would
+# report every bash as one that survives it.
+quit_ends_bash() {                    # -> fgjob's "signal 3" where bash dies of it, "exit 0" where not
+    CS193V_FGJOB_PIDFILE="$SHIM/quit.pid" CS193V_FGJOB_STATUS="$SHIM/quit.status" PATH="$SHIM:$PATH" \
+        "$DO_PY" "$PT_LIB/fgjob.py" bash -c 'kill -QUIT $$; exit 0' >/dev/null 2>&1
+    run_checker cat "$SHIM/quit.status" | do_tr -d '\n'
+}
+shim_new
+quit_ends="$(quit_ends_bash)"
+case "$quit_ends" in
+    'signal 3') key_while_waiting c5b:ctrl-backslash-while-waiting '\034' 3 ;;
+    'exit 0')   skip "c5b:ctrl-backslash-while-waiting" \
+                     "this bash ignores SIGQUIT, so a Ctrl-\\ never ends the launcher; c5c measures the check" ;;
+    *)          fail "c5b:ctrl-backslash-while-waiting" "could not tell whether bash dies of SIGQUIT: $quit_ends" ;;
+esac
+# A FORCE-QUIT WHILE WAITING. A SIGKILL runs no EXIT trap either, under every bash, so this is the
+# case that measures machine_answer_by's check for a vanished launcher wherever c5b cannot.
+key_while_waiting c5c:force-quit-while-waiting -KILL 9
 
 # C6: A STATE READ THAT HANGS NEAR THE DEADLINE leaves nothing behind (#495 review). Two things hold
 # it now: the wait's own reads are clipped to what is left of it, so they finish inside the ceiling it
@@ -796,7 +822,8 @@ else fail "i10:the-naive-control-was-built" "$naive_why"; fi
 
 # I1 + I8: one start, with fds 5, 7 and 8 held open on pipes by THIS suite. 7 and 8 are where the
 # launcher keeps its copies of the terminal (#511) -- which run_timeout's `7>&- 8>&-` on a FUNCTION's
-# call used to hand the VM again, as fds 12 and 13, through bash's saved copies. Not 9: the
+# call used to hand the VM again, as fds 12 and 13, through bash's saved copies -- 3.2's, which are
+# inheritable; 5.3 marks them close-on-exec, so there only 5 can see a leak, and I10 says so. Not 9: the
 # launcher's first probe reuses it for run_timeout's fifo, so nothing held there survives to the
 # start; I12 holds it on a direct call instead. The snapshot says what the VM inherited; the readers
 # say whether anything still holds the pipes once the launcher is gone.
@@ -820,6 +847,25 @@ held_open() {                         # held_open SECS [FD...] -> "7 8" or ""
     wait_until "$secs" all_held_eof "$@" || :
     for n in "$@"; do [ -e "$SHIM/held$n.eof" ] || open="$open $n"; done
     printf '%s' "${open# }"
+}
+# Which fds a child finds the caller's fd 7 on after a FUNCTION's call closed it -- run_timeout's
+# `7>&- 8>&-` shape -- or nothing, where the copy bash saves to put 7 back is close-on-exec. Asked of
+# the `bash` on the launcher's PATH, as quit_ends_bash is.
+saved_fd_leaks() {                    # -> "10" or the like where bash hands its copy down, "" where not
+    local f="$SHIM/saved-fd.probe"
+    : > "$f"
+    run_checker env PATH="$SHIM:$PATH" bash -c 'f() { "$@"; }; f "$@" 7>&-' _ "$DO_PY" -I -c '
+import os, sys
+want = os.stat(sys.argv[1])
+held = []
+for fd in range(3, 256):
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        continue
+    if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
+        held.append(str(fd))
+print(" ".join(held))' "$f" 7<"$f"
 }
 mac stopped
 shape_with_fds "$COPY"
@@ -1016,13 +1062,23 @@ assert_eq "i10:naive-start-dies-when-a-leader-launcher-exits" "no" "$AL_VM"
 mac stopped
 shape_with_fds "$NAIVE"
 if wait_until 10 vm_alive; then
-    # EVERY ONE of the held pipes, so that each of i8's fds is a check that can fail. Proving an
-    # absence: held_open waits its three seconds out when nothing arrives, which is the point.
-    assert_eq "i10:naive-start-keeps-every-held-pipe-open" "$HELD_FDS" "$(held_open 3)"
+    # EACH OF THE HELD PIPES THIS bash CAN LEAK, so that each of i8's fds is a check that can fail.
+    # Proving an absence: held_open waits its three seconds out when nothing arrives, which is the point.
+    assert_eq "i10:naive-start-keeps-fd-5-open" "5" "$(held_open 3 5)"
+    # 7 AND 8 ONLY WHERE bash HANDS ITS SAVED COPIES DOWN, the one way they ever reached the VM (3.2,
+    # measured fds=5,13,14). Where it does not (5.3, fds=5), no start leaks them, naive or not, and
+    # i8's 7 and 8 measure nothing. Their three seconds were spent waiting on 5.
+    saved="$(saved_fd_leaks)"
+    case "$saved" in
+        *"$CHECKER_DIED"*) fail "i10:naive-start-keeps-fds-7-and-8-open" "could not ask bash about its saved fds: $saved" ;;
+        '') skip "i10:naive-start-keeps-fds-7-and-8-open" \
+                 "this bash makes the copies it saves close-on-exec, so no start leaks 7 or 8 and i8 cannot see them" ;;
+        *)  assert_eq "i10:naive-start-keeps-fds-7-and-8-open" "7 8" "$(held_open 0 7 8)" ;;
+    esac
     assert_not_contains "i10:naive-start-vm-does-not-ignore-sighup" "HUP=IGNORE" "$(vm_snap)"
     assert_not_contains "i10:naive-start-vm-keeps-the-callers-directory" " cwd=/ " "$(vm_snap)"
 else
-    fail "i10:naive-start-keeps-every-held-pipe-open" "no VM came up in the naive copy"
+    fail "i10:naive-start-keeps-fd-5-open" "no VM came up in the naive copy"
 fi
 holders_reap
 direct_with_fd9 "$NAIVE"
