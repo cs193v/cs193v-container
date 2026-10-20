@@ -1649,6 +1649,20 @@ else
     fail "fg-stop:takes-the-whole-job" "the wrapper never published its grandchild"
     launcher_fg_stop
 fi
+# pgid_empty REFUSES WHAT IT CANNOT MEASURE (#495 review), with 2 rather than either answer: a group
+# that is not a number, and this suite's own -- never empty, and a caller might go on to signal it.
+pgid_empty '' 2>/dev/null;    assert_eq "pgid-empty:refuses-an-empty-group" "2" "$?"
+pgid_empty 'x1' 2>/dev/null;  assert_eq "pgid-empty:refuses-a-group-that-is-not-a-number" "2" "$?"
+pgid_empty "$(pid_pgid $$)" 2>/dev/null; assert_eq "pgid-empty:refuses-this-suites-own-group" "2" "$?"
+# A LIVE GROUP IS NOT EMPTY, and the same group is once its last member has gone: fg_start's job,
+# whose one command sleeps until killed, and fgjob, which leaves as soon as it has reaped it.
+fg_start sleep 62
+pe_pid="$(launcher_fg_pid)"; pe_g="$(pid_pgid "$pe_pid")"
+pgid_empty "$pe_g" 2>/dev/null; assert_eq "pgid-empty:a-live-group-is-not-empty" "1" "$?"
+kill_if_argv "$pe_pid" "sleep 62" KILL
+if wait_until 10 pgid_empty "$pe_g"; then pass "pgid-empty:a-group-whose-members-have-gone-is-empty"
+else fail "pgid-empty:a-group-whose-members-have-gone-is-empty" "group [$pe_g] still has members"; fi
+launcher_fg_stop
 # msg_last_line ANSWERS A MISSING KEY WITH TEXT NOTHING PRINTS -- not msg()'s own placeholder, which
 # the launcher prints for that key too, so a wait for it would succeed (#509).
 assert_eq "msg-last-line:a-missing-key-is-not-msgs-placeholder" "(no line of no.such-key to match)" \

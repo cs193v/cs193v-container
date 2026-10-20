@@ -1151,8 +1151,7 @@ assert_contains "foreign-dir:names-theirs"   "/somewhere/else/cs193v" "$out"
 # box's ~64 usable columns, so this assertion could never pass there while asking for the path as
 # one contiguous string. Squeezing whitespace out of BOTH sides is safe for a needle that is a
 # path, which contains none.
-squash() { printf '%s' "$1" | do_tr -d '[:space:]┃┏┓┗┛━'; }
-assert_contains "foreign-dir:names-yours" "$(squash "$COPY")" "$(squash "$out")"
+assert_contains "foreign-dir:names-yours" "$(unbox "$COPY")" "$(unbox "$out")"
 assert_eq       "foreign-dir:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq       "foreign-dir:opens-no-shell"  "0" "$(shim_count '^exec ')"
 

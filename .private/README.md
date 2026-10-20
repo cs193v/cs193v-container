@@ -1631,10 +1631,13 @@ the one that owns the terminal for the whole session. Closing the window, which 
 and Ctrl-C both kill it there, and krunkit has no handlers, so each is a power cut with XFS log recovery
 on the next boot. `machine_start_detached` in `files/cs193v-ui.sh` is the answer: `set -m` gives the
 start a process group of its own, `nohup` leaves the VM ignoring SIGHUP, `</dev/null` keeps podman 6
-from asking a question, fds 3–9 are closed because Go passes inherited fds straight through to a
-process that lives for days, and it starts from `/` because the VM keeps the directory it started in,
-and a drive holding one will not eject (#573). Each piece was measured alone first; its comment says
-what each one did.
+from asking a question, every fd above 2 is closed because Go passes inherited fds straight through to
+a process that lives for days — all of them, read off `/dev/fd`, because bash 3.2's saved copies of
+the fds a function call's redirections touch sit at numbers no script names — and it starts from `/`
+because the VM keeps the directory it started in, and a drive holding one will not eject (#573). The
+fork runs with bash's own stderr on `/dev/null`, as main's `RT_DETACH` bracket does, so bash 3.2's
+occasional `child setpgid` complaint never reaches the installer's on-screen log. Each piece was
+measured alone first; its comment says what each one did.
 
 **The recovery's shape** (`machine_recover` in `cs193v`), decided with Keith:
 
@@ -1642,7 +1645,9 @@ what each one did.
   start measured 10–13 s; a launch queued behind another window's start needs about twice that. The
   deadline is time, not spinner ticks: counted in ticks it ran to 66 s on a loaded machine.
 - A Ctrl-C during the wait ends the wait too. Its loop is run_timeout's command, a `&` subshell that a
-  shell without job control hands SIGINT ignored, so it stops once the launcher has gone.
+  shell without job control hands SIGINT ignored, so the launcher's exit kills what preflight still
+  has in flight (`launcher_exit`, #449's `rt_kill_inflight`), and the loop itself stops once the
+  launcher has gone — the one cover for a Ctrl-\ or a force-quit, which run no EXIT trap.
 - A refusal after our start or a wait quotes what podman said last, not the `info` that failed
   before the start.
 - A start that somebody else is making — another window, Podman Desktop — is waited for under its own

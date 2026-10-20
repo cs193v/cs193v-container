@@ -137,9 +137,8 @@ shim_kill_vms() {
         [ -f "$f" ] || continue
         p="$(cat "$f" 2>/dev/null)"
         case "$p" in ''|*[!0-9]*) continue ;; esac
-        if ps -p "$p" -o command= 2>/dev/null | grep -qF "${f%/vm.pid}/vm-fake"; then
-            kill "$p" 2>/dev/null
-        fi
+        # The fake's exact argv: lib/podman-fake starts it as `perl SHIM/vm-fake.pl SHIM`.
+        kill_if_argv "$p" "perl ${f%/vm.pid}/vm-fake.pl ${f%/vm.pid}"
     done
     return 0
 }
@@ -354,6 +353,9 @@ launcher_fg_close() { kill -USR1 "$FG_OWNER" 2>/dev/null; }
 
 launcher_fg_stop() {
     local p g mine
+    # ONCE PER START, whoever calls it: an EXIT trap that calls it again after a case already has
+    # would kill a pty owner's pid that has been reaped since -- possibly somebody else's by then.
+    [ -n "${FG_OWNER:-}" ] || return 0
     p="$(do_tr -d ' \n' 2>/dev/null < "$FG_PIDFILE")"
     # ONLY WHILE fgjob HAS NOT REPORTED AN ENDING. It writes the status after reaping the launcher,
     # so a pid with a status beside it may already be somebody else's -- "IDENTIFIED BEFORE KILLED"
@@ -369,6 +371,7 @@ launcher_fg_stop() {
     fi
     kill -9 "$FG_OWNER" 2>/dev/null
     wait "$FG_OWNER" 2>/dev/null
+    FG_OWNER=''
     exec 8>&-
     rm -f "$FG_FIFO"
 }
@@ -500,34 +503,20 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
-# ─── the fake VM, and a pty driven as a job  (#495, #543) ──────────────────────
+# ─── the fake VM  (#495, #543) ───────────────────────────────────────────────
 # SHARED BY 31-machine-start.sh, which asks them of the launcher, and 25-installer.sh, which asks
 # the same of the installer: one fake (lib/vm-fake.pl writes vm.pid and vm.snapshot into $SHIM),
 # one set of questions. Kept in two copies until the #495 review, which is how a change to one
-# suite's would have quietly stopped matching the other's.
-vm_pid()   { cat "$SHIM/vm.pid" 2>/dev/null | do_tr -d ' \n'; }
+# suite's would have quietly stopped matching the other's. Its process group is lib/portable.sh's
+# pid_pgid, and a pty with a student's Ctrl-C is fg_start's, above.
+#
+# DIGITS OR NOTHING, as pty_inner_pid has it: an unreadable pid must read as no pid, never as a
+# value a comparison could pass on.
+vm_pid()   { local p; p="$(cat "$SHIM/vm.pid" 2>/dev/null | do_tr -d ' \n')"; case "$p" in ''|*[!0-9]*) ;; *) printf '%s' "$p" ;; esac; }
 vm_snap()  { cat "$SHIM/vm.snapshot" 2>/dev/null; }
 vm_alive() { local p; p="$(vm_pid)"; [ -n "$p" ] && ! pid_is_gone "$p"; }
-pgid_of()  { ps -o pgid= -p "$1" 2>/dev/null | do_tr -d ' '; }
-sid_of()   { "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
-
-# WHAT RUNS ON A PTY HAS TO GET SIGINT AT DEFAULT, and from a test it would not: bash hands every `&`
-# command SIGINT and SIGQUIT ignored, and that reaches the program through ptyrun -- the rule
-# 30-launcher-shim.sh's interrupt case records. A student's Ctrl-C reaches a foreground job of an
-# interactive shell, where nothing is ignored, so both are reset before ptyrun runs. Python can
-# reset a disposition that was ignored at its start; a shell cannot. `"$DO_PY" -c "$SHIM_INTRESET"
-# PROGRAM ARGS...` runs PROGRAM with both at default.
-SHIM_INTRESET='import os, signal, sys
-signal.signal(signal.SIGINT, signal.SIG_DFL)
-signal.signal(signal.SIGQUIT, signal.SIG_DFL)
-os.execvp(sys.argv[1], sys.argv[1:])'
-
-# The near end of a pty job -- 31's pty_launch, or installer_job below: stdin a fifo held open on
-# fd 7, the transcript in $PTY_OUT, ptyrun's pid in $PTY_PID.
-pty_type()  { printf '%b' "$1" >&7; }
-pty_close() { kill -USR1 "$PTY_PID" 2>/dev/null; }   # ptyrun's polite close: SIGHUP to the fg group
-pty_end()   { exec 7>&-; kill "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null; rm -f "$PTY_IN"; }
-pty_said()  { [ -n "$1" ] && grep -qF -- "$1" "$PTY_OUT" 2>/dev/null; }
+sid_of()   { case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
+             "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
 
 # THE POSITIVE CONTROLS' HELPER: machine_start_detached in a COPY of cs193v-ui.sh replaced by the
 # plain `podman machine start` everything about it exists to replace -- in the caller's own process
@@ -544,31 +533,6 @@ shim_naive_helper() {                 # shim_naive_helper UI_FILE -> "" or what 
         *'podman machine start </dev/null'*) : ;;
         *)                                   echo "unexpected naive helper: $body" ;;
     esac
-}
-
-# THE FOURTH DOOR (#543): the installer as a JOB on a pty -- a lingering leader above it, the shape
-# a Terminal window has -- with stdin a fifo the caller writes into on fd 7, so a keystroke or a
-# polite close lands when the case decides rather than up front. installer_tty cannot do that: it
-# sends every key before the run and hands back no pid. The same two properties as the other three
-# doors, held by 10-static.sh the same way. The caller ends it: close fd 7, then kill $PTY_PID.
-#
-# SIGINT AT DEFAULT, reset by SHIM_INTRESET above before ptyrun runs.
-installer_job() {                     # installer_job SCRIPT [VAR=VALUE...] -> PTY_PID PTY_OUT, fd 7
-    local script="$1"; shift
-    local cmd a
-    mkdir -p "$SHIM/home"
-    printf '%s' "$SHIM" > "$SHIM_LAST"
-    PTY_IN="$SHIM/pty.in"; PTY_OUT="$SHIM/pty.out"
-    rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
-    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
-    for a in "$@"; do cmd="$cmd '$a'"; done
-    cmd="$cmd bash '$script'"
-    CS193V_PTY_JOB=1 "$DO_PY" -c "$SHIM_INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" \
-        < "$PTY_IN" > "$PTY_OUT" 2>&1 &
-    PTY_PID=$!
-    # Held open on fd 7 so the pty never sees EOF; opened after the background started, so ptyrun
-    # does not inherit it, and its open is the rendezvous with ptyrun's.
-    exec 7>"$PTY_IN"
 }
 
 # THE THIRD DOOR: the script arrives ON STDIN, the way `curl -fsSL URL | bash` delivers it (#297).

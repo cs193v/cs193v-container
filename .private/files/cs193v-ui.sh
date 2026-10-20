@@ -1140,11 +1140,13 @@ ensure_podman_path() {
 #   * </dev/null  podman 6.0.2 asks a question when its stdin is a terminal.
 #   * cd /        krunkit and gvproxy keep the directory they were started in for as long as the
 #                 VM runs, and a drive holding a process's directory will not eject (#573).
-#   * 3>&- .. 9>&-  Go does not close the fds it inherits, so the VM -- which lives for days --
-#                 would hold open whatever the caller had on them: run-tests.sh's 3 and 4, a
-#                 future caller's pipe. 3..9 is every fd a shell script can name. Closed by a
-#                 bare `exec` of their own, BEFORE the one that runs nohup: see the comment there
-#                 for the fd 13 that closing them on the same line leaked.
+#   * every fd above 2  Go does not close the fds it inherits, so the VM -- which lives for days --
+#                 would hold open whatever the caller had: run-tests.sh's 3 and 4, a caller's pipe,
+#                 the terminal copies the launcher keeps on 7 and 8 (#511). EVERY ONE, read off
+#                 /dev/fd, not 3..9 by name: bash 3.2 keeps copies of the fds a function call's
+#                 redirections touch, at numbers no script names, and they are NOT close-on-exec
+#                 above 2. run_timeout's `7>&- 8>&-` on this function's call (#511) handed the VM
+#                 the launcher's 7 and 8 again as 12 and 13 -- measured, with 31's i8 red.
 #   * the waiter is the CALLER'S OWN SHELL, and `set -m` is put back the way the caller had it.
 #                 The first version made the whole body a `( )` subshell, which looked tidier and
 #                 hung things: that subshell is a second bash, it inherits the copy of the caller's
@@ -1154,9 +1156,15 @@ ensure_podman_path() {
 #                 launcher had exited. Measured: 31-machine-start.sh's E2 deadlocked on it, a `$( )`
 #                 that never saw EOF; anything reading the launcher's output to the end would have
 #                 hung the same way. Now the only process that outlives a ceiling is podman, and
-#                 podman was exec'd, so bash's saved copies (close-on-exec) never reached it.
+#                 podman was exec'd after the closes above.
 #   * ( exec nohup ... ) &   the JOB is a subshell that execs straight into nohup, so it can drop a
 #                 terminal stdout (below) without touching the caller's, and `$!` is podman.
+#   * 2>/dev/null ON THE FORK, the caller's stderr carried in on 9: under job control the forked
+#                 child sets its own process group before any redirection of its own exists, and
+#                 bash 3.2 now and then says it could not -- `child setpgid (N to N): Operation not
+#                 permitted` -- on whatever stderr it inherited (4 calls in 700, measured for
+#                 run_timeout's RT_DETACH; 5e2dcb8). Here that was the installer's setup log, which
+#                 the meter's box shows on screen. The job's first act puts the caller's stderr back.
 #
 # REAL Terminal.app, measured by hand (2026-10-12): a VM started this way is not listed among a
 # tab's processes -- Terminal counts the shell's descendants, and krunkit belongs to pid 1 once
@@ -1166,10 +1174,13 @@ ensure_podman_path() {
 # 31-machine-start.sh holds every one of these with a fake VM that inherits exactly what a real
 # one would, including the positive controls that show a naive start's VM dying.
 machine_start_detached() {
-    local p was_m=''
+    local p='' was_m=''
     case "$-" in *m*) was_m=1 ;; esac
     set -m
-    (
+    # p INSIDE THE BRACES: were the 9>&2 to fail, the job never starts, and a $! read afterwards would
+    # be some earlier job's -- the installer's meter animator, which a `wait` would then sit on.
+    { (
+        exec 2>&9 9>&-
         # NEVER A TERMINAL ON 1 OR 2: nohup would answer one by writing nohup.out into the current
         # directory -- the student's course folder, which tunnel_start's comment already guards.
         # Both callers hand it files -- run_timeout in the launcher, and the installer its setup
@@ -1177,12 +1188,16 @@ machine_start_detached() {
         # Inside the job, so the caller's own fds are untouched.
         [ -t 1 ] && exec >/dev/null
         [ -t 2 ] && exec 2>/dev/null
-        # THE CLOSES ARE A STATEMENT OF THEIR OWN, not redirections on the `exec nohup` line, and
+        # THE CLOSES ARE STATEMENTS OF THEIR OWN, not redirections on the `exec nohup` line, and
         # that is measured rather than tidy. Written on the line that runs a command, bash 3.2
         # first SAVES each fd it is about to close -- so it could put them back if the exec failed
         # -- and the saved copy survives the exec: the caller's fd 5 reached the VM as fd 13.
         # `exec` with redirections and no command applies them for good and saves nothing.
-        exec </dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+        exec </dev/null
+        for f in /dev/fd/*; do
+            f="${f##*/}"
+            case "$f" in ''|*[!0-9]*|0|1|2) ;; *) eval "exec $f>&-" ;; esac
+        done
         # NOT THE CALLER'S DIRECTORY (#573). krunkit and gvproxy keep the directory they were
         # started in for as long as the VM runs, and a drive holding some process's directory
         # will not eject: measured, `diskutil eject` "dissented by PID", `hdiutil detach` "Resource
@@ -1190,9 +1205,9 @@ machine_start_detached() {
         # Terminal happened to be. Inside the job, so the caller's own directory is untouched.
         cd / || :
         exec nohup podman machine start
-    ) &
-    p=$!
+    ) & p=$!; } 9>&2 2>/dev/null
     [ -n "$was_m" ] || set +m
+    [ -n "$p" ] || return 125
     wait "$p"
 }
 

@@ -33,10 +33,27 @@ set -u
 . "$(dirname -- "$0")/lib/podman-shim.sh"
 
 PTY_PIDS=''
-pty_reap() { local p; for p in $PTY_PIDS; do kill "$p" 2>/dev/null || true; done; PTY_PIDS=''; }
 HOLDERS=''
-holders_reap() { local p; for p in $HOLDERS; do kill "$p" 2>/dev/null || true; done; HOLDERS=''; }
-trap 'pty_reap; holders_reap; shim_cleanup' EXIT
+# A RECORDED PID IS KILLED ONLY WHILE IT IS STILL THIS SUITE'S CHILD. bash reaps a background job the
+# moment it ends, and a number it has reaped can be anybody's by the time this runs -- the rule
+# tunnel_kill_pid states (#495 review). One that is still our child cannot have been reused.
+reap_ours() {                         # reap_ours "PID..."
+    local p
+    for p in $1; do
+        [ "$(ps -o ppid= -p "$p" 2>/dev/null | do_tr -d ' ')" = "$$" ] && kill "$p" 2>/dev/null
+    done
+    return 0
+}
+pty_reap()     { reap_ours "$PTY_PIDS"; PTY_PIDS=''; }
+holders_reap() { reap_ours "$HOLDERS"; HOLDERS=''; }
+# The calls podman-fake hangs as `sleep 3600` (info_hang_at, machine_inspect_hang_at), by their pid
+# and that argv: each holds whatever the launcher handed it, for an hour, if nothing ends it.
+hung_reap() {
+    local f
+    for f in "${SHIM:-/nonexistent}"/*_hung.pid; do [ -f "$f" ] && kill_if_argv "$(cat "$f")" 'sleep 3600' KILL; done
+    return 0
+}
+trap 'pty_reap; holders_reap; hung_reap; launcher_fg_stop; shim_cleanup' EXIT
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 
 COPY="$(repo_copy)"
@@ -56,15 +73,14 @@ machine_calls() { shim_count '^machine '; }
 # The launch got past preflight: it went on to create the container.
 created()       { shim_count '^run '; }
 vm_state()      { cat "$SHIM/machine_state" 2>/dev/null; }
-# vm_pid, vm_snap, vm_alive, pgid_of and sid_of are lib/podman-shim.sh's, shared with 25-installer.sh.
-vm_gone()       { ! vm_alive; }
+# vm_pid, vm_snap, vm_alive and sid_of are lib/podman-shim.sh's, shared with 25-installer.sh.
 vm_up()         { [ "$(vm_state)" = running ] && vm_alive; }
 # Another window's start moving the state on, written atomically for the reason podman-fake's
 # set_mstate gives: a launcher reading it mid-write would see "no machine".
 vm_set()        { printf '%s' "$1" > "$SHIM/machine_state.t" && mv -f "$SHIM/machine_state.t" "$SHIM/machine_state"; }
-# AN EMPTY NEEDLE NEVER MATCHES. grep -F with "" matches every line, so a wait on a message whose key
-# is missing would return at once and the case after it would measure a race, not the launcher.
-said()          { [ -n "$1" ] && grep -qF -- "$1" "$2" 2>/dev/null; }
+# A NEEDLE grep -F CAN BE TRUSTED WITH, or none: needle_ok refuses a blank or many-line one, which
+# would match at once and leave the case after it measuring a race, not the launcher.
+said()          { needle_ok said "$1" && grep -qF -- "$1" "$2" 2>/dev/null; }
 # How many lines of TEXT carry PHRASE.
 lines_with()    { printf '%s\n' "$2" | grep -cF -- "$1"; }
 
@@ -111,34 +127,18 @@ launch_bg() {                         # launch_bg -> a bare launch, sets LPID
 }
 launch_rc() { wait "$LPID" 2>/dev/null; }
 
-# ─── the pty, with a student's Ctrl-C (I) ──────────────────────────────────────
-# THE LAUNCHER HAS TO GET SIGINT AT DEFAULT, and lib/podman-shim.sh's SHIM_INTRESET is how: see it
-# for why a harness cannot simply hand it on.
-# A bare launch on a pty in JOB MODE -- a lingering leader above the launcher, the shape
-# a Terminal window has -- whose stdin is a fifo this suite writes into: keystrokes are typed when
-# the case decides, not up front. Transcript in $PTY_OUT; ptyrun's pid in $PTY_PID.
-pty_launch() {                        # pty_launch -> a bare launch on a pty
-    PTY_DIR="$LAUNCHER_DIR"
-    local cmd="'$LAUNCHER_DIR/cs193v'"
-    PTY_IN="$SHIM/pty.in"; PTY_OUT="$SHIM/pty.out"
-    rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
-    CS193V_PTY_JOB=1 PATH="$SHIM:$PATH" \
-        "$DO_PY" -c "$SHIM_INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_IN" > "$PTY_OUT" 2>&1 &
-    PTY_PID=$!
-    PTY_PIDS="$PTY_PIDS $PTY_PID"
-    # The writer, held open on fd 7 so the pty never sees EOF. Opened AFTER the background
-    # started, so ptyrun does not inherit it, and its open is the rendezvous with ptyrun's.
-    exec 7>"$PTY_IN"
+# ─── the pty, with a student's Ctrl-C (C, H, I) ────────────────────────────────
+# lib/podman-shim.sh's launcher_fg_*: the launcher as a job on a pty, under lib/fgjob.py, which hands
+# it a student's signal dispositions -- this suite's `&` would hand it SIGINT ignored -- and says how
+# it ended, so `signal 2` is the witness that a typed ^C landed.
+# The job's process group, read while the launcher is there to read it from. fgjob leaves as soon as
+# it has the status, so whatever is still in the group afterwards is a fork of the launcher -- a
+# poller, a probe -- and lib/portable.sh's pgid_empty is the question "is anything left asking".
+fg_group() { pid_pgid "$(launcher_fg_pid)"; }
+group_story() {                       # group_story PGID -> what is still in it, for a FAIL
+    ps -A -o pid= -o ppid= -o stat= -o pgid= -o command= 2>/dev/null \
+        | do_awk -v g="$1" '$4 == g' | do_tr '\n' '|'
 }
-# pty_type, pty_close, pty_end and pty_said are lib/podman-shim.sh's.
-# The launcher itself, found as the process whose argv is our copy's cs193v -- the pty announces
-# no pid in this shape, and ptyrun's tree is leader -> job shell -> launcher. AS BASH RUNS IT, which
-# is `bash PATH` through its env shebang, and so is every subshell it forks. The bare path also
-# matched ptyrun and the job shell, whose argv carry it quoted, so while the pty was open this
-# never came back empty: every `wait_until 15 no_launcher` below waited its full fifteen seconds,
-# and C5 reported the harness as a leftover launcher (#495 review).
-launcher_pids() { pgrep -f "bash ${PTY_DIR:-$LAUNCHER_DIR}/cs193v" 2>/dev/null; }
-no_launcher()   { [ -z "$(launcher_pids)" ]; }
 
 # ═══ A. no VM running, nobody else starting it ══════════════════════════════════
 mac stopped
@@ -225,7 +225,7 @@ shim_touch machine_start_hold
 PATH="$SHIM:$PATH" podman machine start </dev/null >/dev/null 2>&1 &
 other=$!
 HOLDERS="$HOLDERS $other"
-if wait_until 10 sh -c "[ \"\$(cat '$SHIM/machine_state')\" = starting ]"; then
+if wait_until 10 eval '[ "$(vm_state)" = starting ]'; then
     before="$(starts)"
     launch_bg
     if wait_until 15 said "$WAITING" "$SHIM/l.out"; then pass "b1:says-it-is-waiting"
@@ -245,7 +245,7 @@ rm -f "$SHIM/machine_start_hold"
 mac stopped
 hold_start_lock
 launch_bg
-if wait_until 15 sh -c "grep -q '^machine start' '$SHIM/argv.log'"; then
+if wait_until 15 grep -q '^machine start' "$SHIM/argv.log"; then
     vm_set running
     release_start_lock
     launch_rc; rc=$?
@@ -319,7 +319,7 @@ record "b5:seconds" "$took"
 mac stopped
 hold_start_lock
 launch_bg
-if wait_until 15 sh -c "grep -q '^machine start' '$SHIM/argv.log'"; then
+if wait_until 15 grep -q '^machine start' "$SHIM/argv.log"; then
     vm_set starting
     release_start_lock
     if wait_until 15 said "$WAITING" "$SHIM/l.out"; then
@@ -384,15 +384,14 @@ assert_says_key "c3:then-says-restart-the-vm"      err.machine-unreachable "$out
 # start, while the VM was still stopped. Stopped, the fake refuses the connection; started and
 # never answering, it fails the handshake -- so each refusal says which one it quoted. Compared
 # with the box and every space taken out, because the box wraps podman's line where it likes.
-unboxed() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | do_tr -d '[:space:]'; }
 mac stopped
 shim_set info_ok_after 100000
 knobs 4 2
 out="$(launcher)"
 knobs 20 10
 assert_says_key     "c4:after-our-start-says-restart-the-vm"     err.machine-unreachable "$out"
-assert_contains     "c4:quotes-what-podman-said-after-the-start" "ssh:handshakefailed" "$(unboxed "$out")"
-assert_not_contains "c4:not-what-it-said-before-it"              "connectionrefused" "$(unboxed "$out")"
+assert_contains     "c4:quotes-what-podman-said-after-the-start" "ssh:handshakefailed" "$(unbox "$out")"
+assert_not_contains "c4:not-what-it-said-before-it"              "connectionrefused" "$(unbox "$out")"
 # ...and the same after a WAIT: the VM read `running` and refused, then went on failing the
 # handshake for the whole of the wait.
 mac running
@@ -405,8 +404,8 @@ if wait_until 15 said "$WAITING" "$SHIM/l.out"; then
     launch_rc
     l_out="$(cat "$SHIM/l.out")"
     assert_says_key     "c4:after-a-wait-says-restart-the-vm"     err.machine-unreachable "$l_out"
-    assert_contains     "c4:quotes-what-podman-said-during-the-wait" "ssh:handshakefailed" "$(unboxed "$l_out")"
-    assert_not_contains "c4:not-what-it-said-before-it-after-a-wait" "connectionrefused" "$(unboxed "$l_out")"
+    assert_contains     "c4:quotes-what-podman-said-during-the-wait" "ssh:handshakefailed" "$(unbox "$l_out")"
+    assert_not_contains "c4:not-what-it-said-before-it-after-a-wait" "connectionrefused" "$(unbox "$l_out")"
 else
     launch_rc
     fail "c4:after-a-wait-says-restart-the-vm" "never waited: $(cat "$SHIM/l.out")"
@@ -415,31 +414,71 @@ knobs 20 10
 
 # C5: CTRL-C WHILE WAITING ENDS THE WAITING TOO (#495 review). The wait is run_timeout's command, a
 # `&` subshell, and a non-interactive shell hands those SIGINT ignored -- so a Ctrl-C that ended
-# the launcher left that subshell asking podman twice a second until the deadline. It is a fork of
-# the launcher, so it answers to the launcher's own command line.
+# the launcher left that subshell asking podman twice a second until the deadline. Nothing may be
+# left in the launcher's process group once it has gone.
 mac starting
-pty_launch
-if wait_until 15 pty_said "$WAITING"; then
-    pty_type '\003'
-    if wait_until 10 no_launcher; then pass "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman"
+launcher_fg_start
+if launcher_fg_wait 15 "$WAITING"; then
+    c5g="$(fg_group)"
+    launcher_fg_keys '\003'
+    launcher_fg_ended 10
+    assert_eq "c5:the-ctrl-c-landed" "signal 2" "$(launcher_fg_status)"
+    if wait_until 10 pgid_empty "$c5g"; then pass "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman"
     else
-        c5_left=''
-        for p in $(launcher_pids); do
-            c5_left="$c5_left [$(ps -o pid=,ppid=,pgid=,stat= -p "$p" 2>/dev/null) children: $(pgrep -lP "$p" 2>/dev/null | do_tr '\n' ',')]"
-        done
         fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" \
-             "still running:$c5_left; podman asked $(shim_count '^info ') times; last calls: $(tail -3 "$SHIM/argv.log" | do_tr '\n' '|')"
+             "still in group $c5g: $(group_story "$c5g"); podman asked $(shim_count '^info ') times"
     fi
 else
-    fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$PTY_OUT")"
+    fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$FG_OUT")"
 fi
-pty_end
+launcher_fg_stop
 
-# C6: A STATE READ THAT HANGS NEAR THE DEADLINE leaves nothing behind (#495 review). The wait's own
-# reads are clipped to what is left of it, so they finish inside the ceiling it is given; unclipped,
-# a 5 s read outlived that ceiling, whose kill reaches the subshell but not the read it was waiting
-# on -- and a hung read then runs for ever. The first state read is machine_recover's own; the
-# second is the wait's.
+# C5b: ...AND WHILE THE PROBE IN FLIGHT HANGS, the slept Mac's podman. The poller sits in that probe
+# for its whole ten-second ceiling and checks for a vanished launcher only between probes, so what
+# ends it in time is launcher_exit killing what preflight left in flight (#449's rt_kill_inflight).
+# Call 1 is preflight's own `info`; call 2 is the wait's first probe.
+mac starting
+shim_set info_hang_at 2
+launcher_fg_start
+if launcher_fg_wait 15 "$WAITING" && wait_until 15 test -s "$SHIM/info_hung.pid"; then
+    c5g="$(fg_group)"
+    launcher_fg_keys '\003'
+    launcher_fg_ended 10
+    assert_eq "c5b:the-ctrl-c-landed" "signal 2" "$(launcher_fg_status)"
+    if wait_until 3 pgid_empty "$c5g"; then pass "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running"
+    else
+        fail "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running" "still in group $c5g: $(group_story "$c5g")"
+    fi
+else
+    fail "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running" "the probe never hung: $(tail -3 "$FG_OUT")"
+fi
+launcher_fg_stop
+hung_reap
+
+# C5c: CTRL-\ WHILE WAITING. A QUIT runs no EXIT trap -- bash 3.2 and 5 both die of it outright --
+# so launcher_exit never runs, and machine_answer_by's own check for a vanished launcher is all
+# that ends the poller.
+mac starting
+launcher_fg_start
+if launcher_fg_wait 15 "$WAITING"; then
+    c5g="$(fg_group)"
+    launcher_fg_keys '\034'
+    launcher_fg_ended 10
+    assert_eq "c5c:the-ctrl-backslash-landed" "signal 3" "$(launcher_fg_status)"
+    if wait_until 3 pgid_empty "$c5g"; then pass "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman"
+    else
+        fail "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman" "still in group $c5g: $(group_story "$c5g")"
+    fi
+else
+    fail "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$FG_OUT")"
+fi
+launcher_fg_stop
+
+# C6: A STATE READ THAT HANGS NEAR THE DEADLINE leaves nothing behind (#495 review). Two things hold
+# it now: the wait's own reads are clipped to what is left of it, so they finish inside the ceiling it
+# is given -- that ceiling's kill reaches the subshell and not the read it is waiting on -- and the
+# refusal's exit kills what preflight still had in flight. The first state read is machine_recover's
+# own; the second is the wait's.
 #
 # INTO A FILE, NOT A $( ). The hung read is a fork of the launcher and holds a copy of its stdout,
 # so a `$(launcher)` never sees EOF and the suite hangs instead of failing -- measured, red-first.
@@ -450,12 +489,15 @@ launch_bg
 launch_rc
 out="$(cat "$SHIM/l.out")"
 knobs 20 10
-hung="$(pgrep -f "$SHIM/podman machine inspect" 2>/dev/null | do_tr '\n' ' ')"
-if [ -z "$hung" ]; then pass "c6:a-hung-state-read-does-not-outlive-the-launcher"
+hp="$(cat "$SHIM/machine_inspect_hung.pid" 2>/dev/null)"
+if [ -z "$hp" ]; then
+    fail "c6:a-hung-state-read-does-not-outlive-the-launcher" "the second state read never hung, so this measured nothing"
+elif [ "$(ps -ww -o command= -p "$hp" 2>/dev/null)" = 'sleep 3600' ]; then
+    fail "c6:a-hung-state-read-does-not-outlive-the-launcher" "pid $hp is still hung"
 else
-    fail "c6:a-hung-state-read-does-not-outlive-the-launcher" "still running: $hung"
-    pkill -f "$SHIM/podman machine inspect" 2>/dev/null
+    pass "c6:a-hung-state-read-does-not-outlive-the-launcher"
 fi
+hung_reap
 assert_says_key "c6:and-it-still-says-it-is-starting" err.machine-still-starting "$out"
 
 # ═══ D. a VM running that is not ours, or no target at all ══════════════════════
@@ -686,8 +728,9 @@ PTY_PIDS="$PTY_PIDS $g8pid"
 exec 7>"$PTY_IN"
 PASTE="$(msg_text doctor.paste)"
 OLDMENU='Restart the virtual machine to fix the clock'
-wait_until 30 eval 'pty_said "$PASTE" || pty_said "$OLDMENU"'
-pty_said "$OLDMENU" && { pty_type '2'; wait_until 30 pty_said "$PASTE"; }
+g8_said() { said "$1" "$PTY_OUT"; }
+wait_until 30 eval 'g8_said "$PASTE" || g8_said "$OLDMENU"'
+g8_said "$OLDMENU" && { printf '2' >&7; wait_until 30 g8_said "$PASTE"; }
 exec 7>&-
 wait "$g8pid" 2>/dev/null
 # Proving an absence: the leader has exited, and its hangup has had time to land.
@@ -734,25 +777,25 @@ record "h1:seconds" "$took"
 # H4: on a terminal, the spinner leaves a clean line behind and the cursor visible.
 mac stopped
 shim_fake_ssh
-pty_launch
-if wait_until 20 pty_said "$STARTING" && wait_until 20 vm_up; then
-    pty_type 'exit\n'
-    wait_until 15 no_launcher || true
-    rows="$(render_pty < "$PTY_OUT")"
+launcher_fg_start
+if launcher_fg_wait 20 "$STARTING" && wait_until 20 vm_up; then
+    launcher_fg_keys 'exit\n'
+    launcher_fg_ended 15 || true
+    rows="$(render_pty < "$FG_OUT")"
     srow="$(printf '%s\n' "$rows" | grep -F -- "$STARTING" | tail -1)"
     case "$srow" in
         *'⣾'*|*'⣽'*|*'⣻'*|*'⢿'*|*'⡿'*|*'⣟'*|*'⣯'*|*'⣷'*) fail "h4:the-start-line-is-left-clean" "$srow" ;;
         '') fail "h4:the-start-line-is-left-clean" "no rendered row carries the label" ;;
         *)  pass "h4:the-start-line-is-left-clean" ;;
     esac
-    hide="$(grep -o "$(printf '\033')\[?25l" "$PTY_OUT" | wc -l | do_tr -d ' ')"
-    last="$(do_tr -d '\n' < "$PTY_OUT" | grep -o "$(printf '\033')\[?25[lh]" | tail -1)"
+    hide="$(grep -o "$(printf '\033')\[?25l" "$FG_OUT" | wc -l | do_tr -d ' ')"
+    last="$(do_tr -d '\n' < "$FG_OUT" | grep -o "$(printf '\033')\[?25[lh]" | tail -1)"
     if [ "$hide" = 0 ] || [ "$last" = "$(printf '\033')[?25h" ]; then pass "h4:the-cursor-is-left-visible"
     else fail "h4:the-cursor-is-left-visible" "last cursor sequence hides it"; fi
 else
-    fail "h4:the-start-line-is-left-clean" "the launch never showed the start line: $(tail -5 "$PTY_OUT")"
+    fail "h4:the-start-line-is-left-clean" "the launch never showed the start line: $(tail -5 "$FG_OUT")"
 fi
-pty_end
+launcher_fg_stop
 
 # H6: the real defaults, read from the launcher rather than timed.
 assert_contains "h6:deadline-defaults-to-60s" 'CS193V_MACHINE_DEADLINE:-60' "$(cat "$LAUNCHER_DIR/cs193v")"
@@ -770,14 +813,29 @@ naive_why="$(shim_naive_helper "$ui")"
 if [ -z "$naive_why" ]; then pass "i10:the-naive-control-was-built"
 else fail "i10:the-naive-control-was-built" "$naive_why"; fi
 
-# I1 + I8: one start, with fds 5 and 8 held open on pipes by THIS suite. The snapshot says what the
-# VM inherited; the readers say whether anything still holds the pipes once the launcher is gone.
-shape_with_fds() {                    # shape_with_fds DIR -> sets HELD5_EOF HELD8_EOF
-    local dir="$1"
-    mkfifo "$SHIM/held5" "$SHIM/held8"
-    ( cat "$SHIM/held5" >/dev/null; : > "$SHIM/held5.eof" ) & HOLDERS="$HOLDERS $!"
-    ( cat "$SHIM/held8" >/dev/null; : > "$SHIM/held8.eof" ) & HOLDERS="$HOLDERS $!"
-    LAUNCHER_DIR="$dir" launcher > "$SHIM/i1.out" 2>&1 5>"$SHIM/held5" 8>"$SHIM/held8"
+# I1 + I8: one start, with fds 5, 7 and 8 held open on pipes by THIS suite. 7 and 8 are where the
+# launcher keeps its copies of the terminal (#511) -- which run_timeout's `7>&- 8>&-` on a FUNCTION's
+# call used to hand the VM again, as fds 12 and 13, through bash's saved copies. Not 9: the
+# launcher's first probe reuses it for run_timeout's fifo, so nothing held there survives to the
+# start; I12 holds it on a direct call instead. The snapshot says what the VM inherited; the readers
+# say whether anything still holds the pipes once the launcher is gone.
+HELD_FDS='5 7 8'
+hold_fd() {                           # hold_fd N -> a pipe at $SHIM/heldN, $SHIM/heldN.eof at its EOF
+    mkfifo "$SHIM/held$1"
+    ( cat "$SHIM/held$1" >/dev/null; : > "$SHIM/held$1.eof" ) & HOLDERS="$HOLDERS $!"
+}
+shape_with_fds() {                    # shape_with_fds DIR
+    local dir="$1" n
+    for n in $HELD_FDS; do hold_fd "$n"; done
+    LAUNCHER_DIR="$dir" launcher > "$SHIM/i1.out" 2>&1 5>"$SHIM/held5" 7>"$SHIM/held7" 8>"$SHIM/held8"
+}
+all_held_eof() { local n; for n in $HELD_FDS; do [ -e "$SHIM/held$n.eof" ] || return 1; done; }
+# Which of the held pipes are still waiting for EOF after up to SECS.
+held_open() {                         # held_open SECS -> "7 9" or ""
+    local n open=''
+    wait_until "$1" all_held_eof || :
+    for n in $HELD_FDS; do [ -e "$SHIM/held$n.eof" ] || open="$open $n"; done
+    printf '%s' "${open# }"
 }
 mac stopped
 shape_with_fds "$COPY"
@@ -788,20 +846,15 @@ if wait_until 10 vm_alive; then
     # NOT THE CALLER'S DIRECTORY (#573): the VM holds the one it was started in for days, and a
     # drive holding a process's directory cannot be ejected.
     assert_contains "i1:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
-    # 3..9 BY NUMBER: those are the helper's to close. Anything above that arrived from whoever
-    # started this suite -- the launcher cannot name what it does not know about -- and a copy of
-    # one of OUR pipes at a high number is i8's to catch, by EOF, below.
-    low="$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p' | do_tr ',' '\n' | awk '$1 >= 3 && $1 <= 9' | do_tr '\n' ' ')"
-    assert_eq "i1:the-vm-inherited-no-fd-3-to-9" "" "$low"
-    record "i1:fds-the-vm-inherited" "$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
+    # NOTHING ABOVE 2. The helper closes every fd it finds, so the VM inherits none at all -- not
+    # 3..9 by name, which is what let bash's saved copies of 7 and 8 through as 12 and 13.
+    assert_eq "i1:the-vm-inherited-no-fd-above-2" "" "$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
     vp="$(vm_pid)"
-    assert_ne "i1:the-vm-is-not-in-the-launchers-group" "$(pgid_of $$)" "$(pgid_of "$vp")"
+    assert_ne "i1:the-vm-is-not-in-the-launchers-group" "$(pid_pgid $$)" "$(pid_pgid "$vp")"
     assert_eq "i1:but-is-in-the-same-session"           "$(sid_of $$)"  "$(sid_of "$vp")"
-    if wait_until 5 test -e "$SHIM/held5.eof" && wait_until 5 test -e "$SHIM/held8.eof"; then
-        pass "i8:held-pipes-reach-eof-while-the-vm-lives"
-    else
-        fail "i8:held-pipes-reach-eof-while-the-vm-lives" "a reader is still waiting; the VM holds fd 5 or 8"
-    fi
+    i8_open="$(held_open 5)"
+    if [ -z "$i8_open" ]; then pass "i8:held-pipes-reach-eof-while-the-vm-lives"
+    else fail "i8:held-pipes-reach-eof-while-the-vm-lives" "still held open: fd $i8_open"; fi
     if vm_alive; then pass "i8:the-vm-is-still-alive-then"; else fail "i8:the-vm-is-still-alive-then" "vm gone"; fi
     # I7: SIGHUP sent straight to the VM's own group. Proving an ABSENCE, so a fixed wait.
     #
@@ -809,10 +862,10 @@ if wait_until 10 vm_alive; then
     # that lost `set -m` produces -- that group is also run-tests.sh's and its caller's, and the
     # hangup takes the whole run down with it. Measured, by the mutation pass: it did, silently.
     # i1 above already says the VM is in the wrong group; this refuses rather than signalling.
-    vg="$(pgid_of "$vp")"
+    vg="$(pid_pgid "$vp")"
     case "$vg" in
         ''|*[!0-9]*) fail "i7:sighup-to-its-group-does-not-kill-it" "could not read the VM's process group" ;;
-        "$(pgid_of $$)") fail "i7:sighup-to-its-group-does-not-kill-it" \
+        "$(pid_pgid $$)") fail "i7:sighup-to-its-group-does-not-kill-it" \
                               "the VM is in this suite's own process group; refusing to hang it up" ;;
         *)  kill -HUP -- "-$vg" 2>/dev/null
             sleep 2
@@ -825,35 +878,39 @@ fi
 holders_reap
 
 # I2/I3 SHAPE: ^C or a polite close while "Starting the podman VM..." shows, the start held open.
-during_start() {                      # during_start DIR ctrlc|close -> sets DS_RC DS_VM
+# DS_END is how the launcher ended, the witness that the key or the close reached it.
+during_start() {                      # during_start DIR ctrlc|close -> sets DS_VM DS_END
     local dir="$1" how="$2"
     mac stopped
     shim_touch machine_start_hold
-    LAUNCHER_DIR="$dir" pty_launch
-    DS_VM=no
-    if wait_until 20 pty_said "$STARTING" && wait_until 10 test -s "$SHIM/vm.pid"; then
+    LAUNCHER_DIR="$dir" launcher_fg_start
+    DS_VM=no; DS_END=''
+    if launcher_fg_wait 20 "$STARTING" && wait_until 10 test -s "$SHIM/vm.pid"; then
         case "$how" in
-            ctrlc) pty_type '\003' ;;
-            close) pty_close ;;
+            ctrlc) launcher_fg_keys '\003' ;;
+            close) launcher_fg_close ;;
         esac
-        wait_until 15 no_launcher || true
+        launcher_fg_ended 15 || true
+        DS_END="$(launcher_fg_status)"
         rm -f "$SHIM/machine_start_hold"
         # The VM must be up AND still alive: the start finished after the launcher had gone.
         wait_until 10 vm_up && DS_VM=yes
         # Proving an absence: a VM that survived the signal must still be alive a moment later.
         [ "$DS_VM" = yes ] && { sleep 1; vm_alive || DS_VM=died-late; }
     else
-        DS_VM="never-started: $(tail -3 "$PTY_OUT")"
+        DS_VM="never-started: $(tail -3 "$FG_OUT")"
     fi
     rm -f "$SHIM/machine_start_hold"
-    pty_end
+    launcher_fg_stop
 }
 during_start "$COPY" ctrlc
+assert_eq "i2:the-ctrl-c-landed" "signal 2" "$DS_END"
 assert_eq "i2:ctrl-c-during-the-start-leaves-the-vm-starting-and-alive" "yes" "$DS_VM"
 shim_clear_log
 launcher >/dev/null 2>&1
 assert_eq "i2:and-the-next-launch-starts-nothing" "0" "$(starts)"
 during_start "$COPY" close
+assert_eq "i3:the-close-landed" "signal 1" "$DS_END"
 assert_eq "i3:closing-the-window-during-the-start-leaves-the-vm-alive" "yes" "$DS_VM"
 
 # I4 SHAPE: a polite close MID-SESSION, the launcher held in its session by attach_hold.
@@ -862,21 +919,21 @@ mid_session() {                       # mid_session DIR -> sets MS_VM
     mac stopped
     shim_fake_ssh
     shim_touch attach_hold
-    LAUNCHER_DIR="$dir" pty_launch
+    LAUNCHER_DIR="$dir" launcher_fg_start
     MS_VM=no
-    if wait_until 30 sh -c "grep -q -- '--attach' '$SHIM/argv.log'" && vm_alive; then
-        pty_close
-        wait_until 15 no_launcher || true
+    if wait_until 30 grep -q -- '--attach' "$SHIM/argv.log" && vm_alive; then
+        launcher_fg_close
+        launcher_fg_ended 15 || true
         rm -f "$SHIM/attach_hold"
         # Proving an absence: the close has been and gone; the VM must still be there.
         sleep 2
         vm_alive && MS_VM=yes
         [ "$(shim_count '^stop ')" -ge 1 ] && MS_TEARDOWN=yes || MS_TEARDOWN=no
     else
-        MS_VM="never-in-session: $(tail -3 "$PTY_OUT")"; MS_TEARDOWN=no
+        MS_VM="never-in-session: $(tail -3 "$FG_OUT")"; MS_TEARDOWN=no
     fi
     rm -f "$SHIM/attach_hold"
-    pty_end
+    launcher_fg_stop
 }
 mid_session "$COPY"
 assert_eq "i4:closing-the-window-mid-session-leaves-the-vm-alive" "yes" "$MS_VM"
@@ -885,28 +942,29 @@ assert_eq "i4:and-the-launcher-still-tears-its-session-down"      "yes" "$MS_TEA
 # I5: the launcher exits normally first, then the window closes.
 mac stopped
 shim_fake_ssh
-pty_launch
+launcher_fg_start
 if wait_until 20 vm_up; then
-    pty_type 'exit\n'
-    wait_until 15 no_launcher || true
-    pty_close
+    launcher_fg_keys 'exit\n'
+    launcher_fg_ended 15 || true
+    launcher_fg_close
     # Proving an absence.
     sleep 2
     if vm_alive; then pass "i5:a-window-closed-after-the-session-leaves-the-vm-alive"
     else fail "i5:a-window-closed-after-the-session-leaves-the-vm-alive" "it died"; fi
 else
-    fail "i5:a-window-closed-after-the-session-leaves-the-vm-alive" "no VM came up: $(tail -3 "$PTY_OUT")"
+    fail "i5:a-window-closed-after-the-session-leaves-the-vm-alive" "no VM came up: $(tail -3 "$FG_OUT")"
 fi
-pty_end
+launcher_fg_stop
 
 # I6 SHAPE: the launcher IS the session leader (no login shell above it) and exits on its own --
 # --rebuild, which needs no shell. Its exit hangs up the terminal for its whole foreground group.
 as_leader() {                         # as_leader DIR -> sets AL_VM
     local dir="$1"
     mac stopped
+    # NO ^C IS SENT, so the launcher's SIGINT disposition is not what this measures: the exit's
+    # hangup is, and podman-fake already gives the VM INT, QUIT and TERM at default.
     CS193V_PTY_NOSHELL=1 PATH="$SHIM:$PATH" \
-        "$DO_PY" -c "$SHIM_INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$dir/cs193v" --rebuild \
-        </dev/null > "$SHIM/i6.out" 2>&1
+        "$DO_PY" "$PT_LIB/ptyrun.py" "$dir/cs193v" --rebuild </dev/null > "$SHIM/i6.out" 2>&1
     # Proving an absence: the leader has exited and the hangup has been sent.
     sleep 2
     AL_VM=no
@@ -930,7 +988,7 @@ mac stopped
 # IN $SHIM, so that what nohup would leave behind lands where this case can look for it -- and not
 # in the checkout, which is where the mutation pass's guard-less helper put one.
 PATH="$SHIM:$PATH" do_script 20 \
-    "cd '$SHIM' && bash -c '. \"$COPY/.private/files/cs193v-ui.sh\"; machine_start_detached; echo helper-rc=\$?'" \
+    "cd $(sh_quote "$SHIM") && $(sh_quote bash -c '. "$1"; machine_start_detached; echo helper-rc=$?' _ "$COPY/.private/files/cs193v-ui.sh")" \
     </dev/null > "$SHIM/i11.out" 2>&1
 assert_eq           "i11:a-direct-call-on-a-terminal-starts-the-vm" "running" "$(vm_state)"
 assert_contains     "i11:and-returns-podmans-status"                "helper-rc=0" "$(cat "$SHIM/i11.out")"
@@ -939,12 +997,32 @@ assert_not_contains "i11:podman-was-never-asked-a-question" "default system conn
 # directory -- a student's course folder -- and the helper's guard is what stops it.
 assert_no_file      "i11:no-nohup-out-left-where-it-ran"    "$SHIM/nohup.out"
 
+# I12: THE HELPER CALLED DIRECTLY, as the installer calls it -- `>>log 2>&1` -- with fd 9 held open:
+# the fd the helper carries the caller's stderr in on past its fork, so a copy bash saved of the
+# caller's own 9 is one more thing the VM could inherit.
+direct_with_fd9() {                   # direct_with_fd9 DIR
+    mac stopped
+    hold_fd 9
+    PATH="$SHIM:$PATH" bash -c '. "$1"; machine_start_detached >>"$2" 2>&1' \
+        _ "$1/.private/files/cs193v-ui.sh" "$SHIM/i12.log" 9>"$SHIM/held9"
+}
+direct_with_fd9 "$COPY"
+if wait_until 10 vm_alive; then
+    assert_eq "i12:a-direct-call-hands-the-vm-no-fd" "" "$(vm_snap | sed -n 's/.*fds=//p')"
+    if wait_until 5 test -e "$SHIM/held9.eof"; then pass "i12:and-the-callers-fd-9-reaches-eof"
+    else fail "i12:and-the-callers-fd-9-reaches-eof" "the VM holds the caller's fd 9"; fi
+else
+    fail "i12:a-direct-call-hands-the-vm-no-fd" "no fake VM came up: $(cat "$SHIM/i12.log" 2>/dev/null)"
+fi
+holders_reap
+
 # I10: THE POSITIVE CONTROLS. The same harness, a naive helper: the VM must die in every shape the
 # real helper survives, or those cases above measured nothing.
 # "no" EXACTLY, not merely "not yes": each shape reports "no" only when the VM came up and then
 # died, and something else when it never came up at all -- which would be a control that
 # controls nothing.
 during_start "$NAIVE" ctrlc
+assert_eq "i10:the-naive-ctrl-c-landed" "signal 2" "$DS_END"
 assert_eq "i10:naive-start-dies-on-ctrl-c" "no" "$DS_VM"
 mid_session "$NAIVE"
 assert_eq "i10:naive-start-dies-on-a-mid-session-close" "no" "$MS_VM"
@@ -953,14 +1031,22 @@ assert_eq "i10:naive-start-dies-when-a-leader-launcher-exits" "no" "$AL_VM"
 mac stopped
 shape_with_fds "$NAIVE"
 if wait_until 10 vm_alive; then
-    if wait_until 3 test -e "$SHIM/held5.eof"; then
-        fail "i10:naive-start-keeps-the-held-pipe-open" "EOF arrived -- the fd test cannot see a leak"
-    else
-        pass "i10:naive-start-keeps-the-held-pipe-open"
-    fi
+    # EVERY ONE of the held pipes, so that each of i8's fds is a check that can fail. Proving an
+    # absence: held_open waits its three seconds out when nothing arrives, which is the point.
+    assert_eq "i10:naive-start-keeps-every-held-pipe-open" "$HELD_FDS" "$(held_open 3)"
     assert_not_contains "i10:naive-start-vm-does-not-ignore-sighup" "HUP=IGNORE" "$(vm_snap)"
     assert_not_contains "i10:naive-start-vm-keeps-the-callers-directory" " cwd=/ " "$(vm_snap)"
 else
-    fail "i10:naive-start-keeps-the-held-pipe-open" "no VM came up in the naive copy"
+    fail "i10:naive-start-keeps-every-held-pipe-open" "no VM came up in the naive copy"
+fi
+holders_reap
+direct_with_fd9 "$NAIVE"
+if wait_until 10 vm_alive; then
+    # Proving an absence: EOF that never comes is waited out.
+    if wait_until 3 test -e "$SHIM/held9.eof"; then
+        fail "i10:a-naive-direct-start-keeps-fd-9-open" "EOF arrived -- i12 cannot see a leak"
+    else pass "i10:a-naive-direct-start-keeps-fd-9-open"; fi
+else
+    fail "i10:a-naive-direct-start-keeps-fd-9-open" "no VM came up in the naive copy"
 fi
 holders_reap
