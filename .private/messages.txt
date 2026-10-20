@@ -136,8 +136,9 @@ can only run one at a time.
 
 [[err.machine-other-active-unnamed.fix]]
 The first command lists them, and the one that is running says
-"Currently running". Stop that one with the second command,
-putting its name in place of NAME, then run ./cs193v again:
+"Currently running" or "Currently starting". Stop that one with
+the second command, putting its name in place of NAME, then run
+./cs193v again:
 
     podman machine list
     podman machine stop NAME

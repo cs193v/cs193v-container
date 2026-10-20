@@ -500,6 +500,26 @@ fi
 hung_reap
 assert_says_key "c6:and-it-still-says-it-is-starting" err.machine-still-starting "$out"
 
+# C7: A PROBE THAT HANGS WITHOUT A WORD keeps podman's last words (#495 review). Each failed probe
+# used to replace them, so a probe that timed out silently emptied them, and the refusal fell back to
+# the `info` from before the start. Call 1 is preflight's read of the stopped VM, refused; call 2 the
+# first probe after our start, a failed handshake; call 3 hangs to the deadline. Pinned at 4 s, so
+# that no later probe can put the handshake back and hide the loss.
+mac stopped
+shim_set info_ok_after 100000
+shim_set info_hang_at 3
+knobs 4 2
+launch_bg
+launch_rc
+out="$(cat "$SHIM/l.out")"
+knobs 20 10
+assert_says_key     "c7:says-restart-the-vm"                   err.machine-unreachable "$out"
+assert_contains     "c7:a-silent-hang-keeps-podmans-last-words" "ssh:handshakefailed" "$(unbox "$out")"
+assert_not_contains "c7:not-the-words-from-before-the-start"    "connectionrefused" "$(unbox "$out")"
+if [ -s "$SHIM/info_hung.pid" ]; then pass "c7:the-third-call-really-hung"
+else fail "c7:the-third-call-really-hung" "no info call hung, so this measured nothing"; fi
+hung_reap
+
 # ═══ D. a VM running that is not ours, or no target at all ══════════════════════
 # D1: another machine is up. Say which, at once -- there is nothing to wait for.
 mac stopped
@@ -508,6 +528,7 @@ t0=$SECONDS
 out="$(launcher)"; rc=$?
 took=$((SECONDS - t0))
 assert_says_sub "d1:names-the-other-machine"   err.machine-other-active "$out" "$PRIVATE/messages.txt" NAME=pmd-other
+assert_says_sub "d1:says-how-to-stop-it"       err.machine-other-active.fix "$out" "$PRIVATE/messages.txt" NAME=pmd-other
 assert_contains "d1:quotes-podmans-reason"     "only one VM can be active at a time" "$out"
 assert_ne       "d1:exits-nonzero"             "0" "$rc"
 if [ "$took" -le 5 ]; then pass "d1:says-so-promptly"; else fail "d1:says-so-promptly" "took ${took}s"; fi
@@ -526,6 +547,9 @@ out="$(launcher)"
 assert_says_key     "d1:an-unnamed-one-still-says-another-is-running" err.machine-other-active-unnamed "$out"
 assert_says_key     "d1:an-unnamed-one-says-how-to-find-it"           err.machine-other-active-unnamed.fix "$out"
 assert_contains     "d1:an-unnamed-one-names-machine-list"            "podman machine list" "$out"
+# A VM STILL BOOTING says "Currently starting" in that list, not "running" (#495 review): told to
+# look for the one, a student whose other machine was mid-start found no row to read the name from.
+assert_says         "d1:an-unnamed-one-names-a-starting-machine-too"  'Currently starting' "$out"
 assert_not_contains "d1:an-unnamed-one-names-no-placeholder"          "stop ?" "$out"
 
 # D2: a machine exists, but not the default one: nothing to start.

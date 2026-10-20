@@ -993,19 +993,19 @@ machine_refuse_start() {              # machine_refuse_start OUTPUT -> dies
 #   unable to start "podman-machine-default": NAME already starting or running: only one VM ...
 #   unable to start: NAME already starting or running on the P provider: only one VM ...
 machine_refuse_other() {              # machine_refuse_other OUTPUT -> dies
-    local name
+    local name head fix
     name="$(printf '%s\n' "$1" | sed -n 's/.*: \([^ ]*\) already starting or running.*/\1/p' | head -1)"
+    # The keys spelled out in each arm rather than chosen by name: 20-messages.sh's keys:no-orphans
+    # finds a key in use only as a literal `msg KEY`.
     if [ -n "$name" ]; then
-        die "$(refusal "$(msg err.machine-other-active NAME="$name")" \
-                       "$(podman_said_text "$(machine_error_lines "$1")")" \
-                       "$(msg err.machine-other-active.fix NAME="$name")")"
+        head="$(msg err.machine-other-active NAME="$name")"; fix="$(msg err.machine-other-active.fix NAME="$name")"
+    else
+        # A WORDING NEITHER PATTERN READS -- another release, another provider. The fix used to be
+        # `podman machine stop ?`, at the one refusal whose point is a command to paste (#495
+        # review); now it is the command that lists the machines, so the student can read the name.
+        head="$(msg err.machine-other-active-unnamed)"; fix="$(msg err.machine-other-active-unnamed.fix)"
     fi
-    # A WORDING NEITHER PATTERN READS -- another release, another provider. The fix used to be
-    # `podman machine stop ?`, at the one refusal whose point is a command to paste (#495 review);
-    # now it is the command that lists the machines, so the student can read the name off it.
-    die "$(refusal "$(msg err.machine-other-active-unnamed)" \
-                   "$(podman_said_text "$(machine_error_lines "$1")")" \
-                   "$(msg err.machine-other-active-unnamed.fix)")"
+    die "$(refusal "$head" "$(podman_said_text "$(machine_error_lines "$1")")" "$fix")"
 }
 
 # One `podman info`, clipped to SECS, answering only "did podman answer". No label, no stderr in
@@ -1061,7 +1061,9 @@ machine_answer_by() {                 # machine_answer_by END [stop] -> 0 answer
         [ "$n" -ge 1 ] || return 1
         [ "$n" -le 10 ] || n=10
         machine_probe "$n" && return 0
-        MA_ERR="$RT_ERR"
+        # ONLY WHAT PODMAN SAID. A probe that hit its ceiling without a word has nothing to add, and
+        # taking its silence emptied the last thing podman did say (#495 review).
+        [ -z "$RT_ERR" ] || MA_ERR="$RT_ERR"
         # With `stop`, a VM that has gone back to stopped ends the wait: somebody else's start
         # gave up, and the caller can make its own. CLIPPED TO END like the probe, so the loop
         # finishes inside the ceiling machine_wait gives it: that ceiling's kill reaches this

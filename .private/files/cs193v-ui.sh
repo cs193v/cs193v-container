@@ -480,7 +480,10 @@ RT_DETACH=''
 # said 80, `stty size </dev/tty` said `24 50`.
 term_cols() {                         # term_cols -> columns, or 80 when there is no telling
     local sz
-    sz="$(stty size </dev/tty 2>/dev/null)"
+    # 2>/dev/null BEFORE THE <: redirections apply left to right, so the other order had the open
+    # of /dev/tty fail with stderr still the terminal's -- "Device not configured" over the spinner,
+    # for any process with no controlling terminal (#495 review).
+    sz="$(stty size 2>/dev/null </dev/tty)"
     sz="${sz#* }"
     case "$sz" in ''|0|*[!0-9]*) sz=80 ;; esac
     printf '%s' "$sz"
@@ -496,7 +499,7 @@ rt_fit() {                            # rt_fit TEXT WIDTH -> RT_FIT
 RT_FIT=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
-    local tmp fifo eout pid cpid i rc frame lbl pad end line t0 room
+    local tmp fifo eout pid cpid i rc frame lbl pad end line t0 last room
     # DRAIN THE STDOUT BUFFER BEFORE THE FIRST FORK, and this is not hygiene (#170). On macOS a
     # write to fd 1 that FAILS leaves its bytes in bash 3.2's buffer -- BSD stdio keeps the
     # unwritten tail and 3.2 has no fpurge -- and the buffer is never cleared, so every later
@@ -583,13 +586,23 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # 66. SECONDS alone would be up to a second SHORT, since it counts whole seconds from
         # wherever in one this call began -- so it ends the loop only once it reads more than
         # secs, which is always at least secs and at most one over.
-        t0=$SECONDS
+        #
+        # BUT SECONDS IS THE WALL CLOCK, and a jump in it is not time this call spent (#495 review).
+        # A lid closed for an hour reads as an hour waited, so the first tick after waking killed a
+        # healthy `podman run` as a timeout -- where the ticks had simply paused with the machine. A
+        # tick that saw SECONDS move more than 5 s, which no tick takes, moves t0 on by the jump;
+        # the ticks bound a clock stepped BACK. What this cannot reach is a caller's own absolute
+        # deadline: the VM wait's END is SECONDS-based too, and still ends at its next check.
+        t0=$SECONDS; last=$SECONDS
         while [ "$i" -lt "$((secs * 10))" ] && [ "$(( SECONDS - t0 ))" -le "$secs" ]; do
             if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
-            # THE LATER LABEL, on the tick it falls due and once. [K on the redraw because the two
-            # labels differ in length, and a shorter one drawn over a longer one leaves its tail.
+            # THE LATER LABEL, once, when it falls due by the same two clocks as the ceiling -- by
+            # ticks alone it came late on a loaded machine, and never on a slow enough one. [K on the
+            # redraw because the two labels differ in length, and a shorter one drawn over a longer
+            # one leaves its tail.
             if [ -n "$RT_SPIN_LATER" ] && [ -n "$RT_SPIN" ] && [ -z "$RT_ROW" ] \
-               && [ "$lbl" != "$RT_SPIN_LATER" ] && [ "$i" -ge "$(( ${RT_SPIN_AT:-0} * 10 ))" ]; then
+               && [ "$lbl" != "$RT_SPIN_LATER" ] \
+               && { [ "$i" -ge "$(( ${RT_SPIN_AT:-0} * 10 ))" ] || [ "$(( SECONDS - t0 ))" -gt "${RT_SPIN_AT:-0}" ]; }; then
                 lbl="$RT_SPIN_LATER"
                 rt_fit "$lbl" "$room"
                 if [ -t 1 ]; then printf '\r%s%s  %s%s[K' "$pad" "$(meter_glyph "$frame")" "$RT_FIT" "$ESC"
@@ -603,6 +616,8 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
             fi
             sleep 0.1
             i=$((i + 1))
+            [ "$(( SECONDS - last ))" -le 5 ] || t0=$(( t0 + SECONDS - last ))
+            last=$SECONDS
         done
     else
         # THE PIPE IS A DEATH CERTIFICATE. The wrapper subshell holds the write end, and its
