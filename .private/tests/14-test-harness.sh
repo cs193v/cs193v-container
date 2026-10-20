@@ -1649,6 +1649,22 @@ else
     fail "fg-stop:takes-the-whole-job" "the wrapper never published its grandchild"
     launcher_fg_stop
 fi
+# shim_kill_hung ENDS A CALL podman-fake HUNG, in any shim of this run, by its pid file and argv --
+# and nothing else that a pid file names (#495 review). The hang is what the fake's *_hang_at
+# knobs turn a call into, `sleep 3600`; the decoy is any other process a file could name.
+sleep 3600 >/dev/null 2>&1 & kh_hung=$!
+sleep 3601 >/dev/null 2>&1 & kh_decoy=$!
+printf '%s\n' "$kh_hung" > "$SHIM/info_hung.pid"
+printf '%s\n' "$kh_decoy" > "$SHIM/machine_inspect_hung.pid"
+shim_kill_hung
+if wait_until 10 pid_is_gone "$kh_hung"; then pass "kill-hung:ends-a-hung-call"
+else fail "kill-hung:ends-a-hung-call" "the hung sleep $kh_hung is still alive"; fi
+# PROVING AN ABSENCE, so a fixed wait: a decoy left alone gives no sign of it.
+sleep 0.5
+if pid_is_gone "$kh_decoy"; then fail "kill-hung:leaves-any-other-pid-alone" "it killed $kh_decoy, a sleep 3601"
+else pass "kill-hung:leaves-any-other-pid-alone"; fi
+kill_if_argv "$kh_hung" "sleep 3600" KILL; kill_if_argv "$kh_decoy" "sleep 3601" KILL
+rm -f "$SHIM/info_hung.pid" "$SHIM/machine_inspect_hung.pid"
 # pgid_empty REFUSES WHAT IT CANNOT MEASURE (#495 review), with 2 rather than either answer: a group
 # that is not a number, and this suite's own -- never empty, and a caller might go on to signal it.
 pgid_empty '' 2>/dev/null;    assert_eq "pgid-empty:refuses-an-empty-group" "2" "$?"

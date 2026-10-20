@@ -441,11 +441,11 @@ assert_eq "rt:the-later-label-shows-on-slow-ticks" "1" "$(printf '%s\n' "$lt" | 
 # end, and nothing else. A SCRIPT FILE AND ITS PATHS IN THE ENVIRONMENT, so that nothing a pty's shell
 # parses again carries the checkout's path (#436).
 cat > "$WORK/later-redraw.sh" <<'SUBJECT'
-. "$RL_UI"
+. "$CS193V_UI"
 RT_SPIN='a much longer first label'; RT_SPIN_AT=1; RT_SPIN_LATER=short
 run_timeout 5 sleep 2; echo done
 SUBJECT
-lt="$(RL_UI="$PRIVATE/files/cs193v-ui.sh" do_script 20 "$(sh_quote bash "$WORK/later-redraw.sh")" 2>&1 | render_pty)"
+lt="$(CS193V_UI="$PRIVATE/files/cs193v-ui.sh" do_script 20 "$(sh_quote bash "$WORK/later-redraw.sh")" 2>&1 | render_pty)"
 lrow="$(printf '%s\n' "$lt" | grep -F 'short' | tail -1)"
 case "$lrow" in
     '')        fail "rt:later-redraws-the-row-on-a-terminal" "no row carries the second label: $lt" ;;
@@ -463,11 +463,11 @@ assert_not_contains "rt:later-leaves-the-first-label-behind-it-on-a-terminal" \
 # output that carries a spinner glyph must fit in one column less than the pty.
 LONGLBL='a label that is a good deal longer than forty columns of terminal'
 cat > "$WORK/wide-label.sh" <<'SUBJECT'
-. "$RL_UI"
+. "$CS193V_UI"
 RT_SPIN=short; RT_SPIN_AT=0; RT_SPIN_LATER="$RL_LATER"
 run_timeout 5 sleep 1; echo done
 SUBJECT
-lt="$(CS193V_PTY_COLS=40 RL_UI="$PRIVATE/files/cs193v-ui.sh" RL_LATER="$LONGLBL" \
+lt="$(CS193V_PTY_COLS=40 CS193V_UI="$PRIVATE/files/cs193v-ui.sh" RL_LATER="$LONGLBL" \
       do_script 20 "$(sh_quote bash "$WORK/wide-label.sh")" 2>&1)"
 widest="$(printf '%s' "$lt" | "$DO_PY" -c '
 import re, sys
@@ -486,15 +486,13 @@ assert_contains "rt:a-wide-label-is-printed-whole-when-the-wait-ends" "$LONGLBL"
 
 # term_cols WITH NO TERMINAL TO ASK SAYS 80 AND NOTHING ELSE (#495 review). `stty size </dev/tty
 # 2>/dev/null` opens /dev/tty before its stderr is redirected, so a process with no controlling
-# terminal printed bash's own "Device not configured" over the spinner row. A new session is the
-# no-terminal case: python forks first, since a group leader cannot setsid.
+# terminal printed bash's own "Device not configured" over the spinner row. lib/nosid.py is the
+# no-terminal case: a session of its own, so /dev/tty opens for nothing beneath it.
 cat > "$WORK/no-ctty.sh" <<'SUBJECT'
-. "$TC_UI"
+. "$CS193V_UI"
 term_cols
 SUBJECT
-tc_out="$(TC_UI="$PRIVATE/files/cs193v-ui.sh" "$DO_PY" -c 'import subprocess, sys
-sys.exit(subprocess.run(["bash", sys.argv[1]], start_new_session=True).returncode)' \
-          "$WORK/no-ctty.sh" 2>"$WORK/no-ctty.err")"
+tc_out="$(CS193V_UI="$PRIVATE/files/cs193v-ui.sh" "$DO_PY" "$PT_LIB/nosid.py" bash "$WORK/no-ctty.sh" 2>"$WORK/no-ctty.err")"
 assert_eq "rt:term-cols-without-a-terminal-says-80" "80" "$tc_out"
 assert_eq "rt:term-cols-is-silent-without-a-terminal" "" "$(cat "$WORK/no-ctty.err")"
 

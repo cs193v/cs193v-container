@@ -181,7 +181,7 @@ HOME_AT_START="$(home_state)"
 record "door:the-real-home-at-suite-start" "$HOME_AT_START"
 
 door_check() { assert_eq "door:the-real-home-is-as-we-found-it" "$HOME_AT_START" "$(home_state)"; }
-trap 'launcher_fg_stop; door_check; rm -rf "$TMP"; shim_cleanup' EXIT
+trap 'door_check; rm -rf "$TMP"; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
 # ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
@@ -1781,18 +1781,13 @@ assert_says     "mac-resize:a-failed-restart-carries-podmans-words" "the VM woul
 
 # ─── ...and a Ctrl-C or a closed window afterwards leaves it running  (#543) ───
 # THE BEHAVIOUR ITSELF: the installer as a job on a pty, the shape a Terminal window has, typed at
-# when the case decides -- lib/podman-shim.sh's fg_start around the bootstrap, so the installer gets
-# a student's signal dispositions and the case learns how it ended. Each `VAR=VALUE` is its own
-# argument to env, and nothing is spliced into a string a shell parses again (#436).
-course_job() {                        # course_job TARBALL -> the installer, as a job, from TARBALL
-    mkdir -p "$SHIM/home"
-    printf '%s' "$SHIM" > "$SHIM_LAST"
-    fg_start env "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "CS193V_TARBALL=$1" "CS193V_DIR=$SHIM/dest" bash "$PRIVATE/install-cs193v.sh"
-}
-# The installer's process group, read while it is there to read it from: the installer and
+# when the case decides -- lib/podman-shim.sh's installer_job, so the installer gets a student's
+# signal dispositions and the case learns how it ended. Its launcher_fg_pgid is the installer and
 # everything it ran -- its boot tree, the course's launcher, their podman calls -- and never the VM,
-# which the helper starts in a group of its own. Empty once all of them are gone.
-course_group() { pid_pgid "$(launcher_fg_pid)"; }
+# which the helper starts in a group of its own: empty once all of them are gone.
+course_job() {                        # course_job TARBALL -> the installer, as a job, from TARBALL
+    installer_job "$PRIVATE/install-cs193v.sh" "CS193V_TARBALL=$1" "CS193V_DIR=$SHIM/dest"
+}
 
 # THE NAIVE INSTALLER, for the positive controls: the same tree with its helper replaced by the
 # plain start everything above exists to replace -- lib/podman-shim.sh's shim_naive_helper, which
@@ -1821,7 +1816,7 @@ vm_interrupt() {
     elif ! wait_until 10 vm_alive; then
         VI_RESULT="no-live-vm-at-the-build: $(vm_story)"
     else
-        vp="$(vm_pid)"; g="$(course_group)"
+        vp="$(vm_pid)"; g="$(launcher_fg_pgid)"
         case "$how" in int) launcher_fg_keys '\003' ;; close) launcher_fg_close ;; esac
         launcher_fg_ended 20 || :
         VI_END="$(launcher_fg_status)"
@@ -1860,7 +1855,7 @@ vm_mac
 shim_touch machine_start_hold
 course_job "$TMP/course.tar.gz"
 if launcher_fg_wait 120 "$STARTING_VM" && wait_until 10 vm_alive; then
-    g="$(course_group)"
+    g="$(launcher_fg_pgid)"
     launcher_fg_keys '\003'
     launcher_fg_ended 20 || :
     if wait_until 20 pgid_empty "$g"; then pass "vmsurvives:ctrl-c-during-the-start-ends-the-installer"

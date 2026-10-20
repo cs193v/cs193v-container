@@ -1197,9 +1197,15 @@ machine_recover() {                   # machine_recover MODE INFO_RC INFO_STDERR
 #           boot a VM in order to stop or reconnect nothing.
 #   (none)  the refusal, as before.
 MACHINE_DOWN=''
-preflight() {
-    # FIRST, and cleared at both ways out; see launcher_exit.
+# THE CHECKS WITH launcher_exit's KILL ARMED, and a wrapper rather than an arm and a disarm at each
+# of preflight_checks' ways out, so that a return added to it later cannot leave the kill armed for
+# whatever comes after. No caller reads the status; a refusal ends the launcher from inside.
+preflight() {                         # preflight [start|ifup]
     KILL_INFLIGHT_AT_EXIT=1
+    preflight_checks "$@"
+    KILL_INFLIGHT_AT_EXIT=''
+}
+preflight_checks() {
     if [ "$(id -u)" -eq 0 ]; then die "$(msg err.running-as-root)"; fi
 
     # ISSUE #121, see ensure_podman_path. AFTER the root refusal and BEFORE every podman probe:
@@ -1252,7 +1258,6 @@ preflight() {
     # makes itself, so a false here can mean nothing else.
     if [ "$info_rc" -ne 0 ] && ! machine_recover "${1:-}" "$info_rc" "$RT_ERR"; then
         MACHINE_DOWN=1
-        KILL_INFLIGHT_AT_EXIT=''
         return 0
     fi
     # THREE ANSWERS WHERE THERE WERE TWO. `!= "true"` inferred "rootful" from every answer that
@@ -1275,7 +1280,6 @@ preflight() {
     fi
 
     [ -d "$WORKSPACE" ] || mkdir -p "$WORKSPACE" || die "$(msg err.no-workspace DIR="$WORKSPACE")"
-    KILL_INFLIGHT_AT_EXIT=''
 }
 
 # ─── container state ───────────────────────────────────────────────────────────

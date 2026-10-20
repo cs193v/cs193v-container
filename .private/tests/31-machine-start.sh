@@ -32,7 +32,6 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 . "$(dirname -- "$0")/lib/podman-shim.sh"
 
-PTY_PIDS=''
 HOLDERS=''
 # A RECORDED PID IS KILLED ONLY WHILE IT IS STILL THIS SUITE'S CHILD. bash reaps a background job the
 # moment it ends, and a number it has reaped can be anybody's by the time this runs -- the rule
@@ -44,16 +43,8 @@ reap_ours() {                         # reap_ours "PID..."
     done
     return 0
 }
-pty_reap()     { reap_ours "$PTY_PIDS"; PTY_PIDS=''; }
 holders_reap() { reap_ours "$HOLDERS"; HOLDERS=''; }
-# The calls podman-fake hangs as `sleep 3600` (info_hang_at, machine_inspect_hang_at), by their pid
-# and that argv: each holds whatever the launcher handed it, for an hour, if nothing ends it.
-hung_reap() {
-    local f
-    for f in "${SHIM:-/nonexistent}"/*_hung.pid; do [ -f "$f" ] && kill_if_argv "$(cat "$f")" 'sleep 3600' KILL; done
-    return 0
-}
-trap 'pty_reap; holders_reap; hung_reap; launcher_fg_stop; shim_cleanup' EXIT
+trap 'holders_reap; shim_cleanup' EXIT
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 
 COPY="$(repo_copy)"
@@ -130,11 +121,9 @@ launch_rc() { wait "$LPID" 2>/dev/null; }
 # ─── the pty, with a student's Ctrl-C (C, H, I) ────────────────────────────────
 # lib/podman-shim.sh's launcher_fg_*: the launcher as a job on a pty, under lib/fgjob.py, which hands
 # it a student's signal dispositions -- this suite's `&` would hand it SIGINT ignored -- and says how
-# it ended, so `signal 2` is the witness that a typed ^C landed.
-# The job's process group, read while the launcher is there to read it from. fgjob leaves as soon as
-# it has the status, so whatever is still in the group afterwards is a fork of the launcher -- a
+# it ended, so `signal 2` is the witness that a typed ^C landed. fgjob leaves as soon as it has the
+# status, so whatever is still in launcher_fg_pgid's group afterwards is a fork of the launcher -- a
 # poller, a probe -- and lib/portable.sh's pgid_empty is the question "is anything left asking".
-fg_group() { pid_pgid "$(launcher_fg_pid)"; }
 group_story() {                       # group_story PGID -> what is still in it, for a FAIL
     ps -A -o pid= -o ppid= -o stat= -o pgid= -o command= 2>/dev/null \
         | do_awk -v g="$1" '$4 == g' | do_tr '\n' '|'
@@ -384,14 +373,26 @@ assert_says_key "c3:then-says-restart-the-vm"      err.machine-unreachable "$out
 # start, while the VM was still stopped. Stopped, the fake refuses the connection; started and
 # never answering, it fails the handshake -- so each refusal says which one it quoted. Compared
 # with the box and every space taken out, because the box wraps podman's line where it likes.
+#
+# AND A PROBE THAT HANGS WITHOUT A WORD DOES NOT EMPTY THEM. Each failed probe used to replace
+# podman's last words, so one that timed out silently emptied them and the refusal fell back to the
+# words from before the start. Call 1 is preflight's read of the stopped VM, refused; call 2 the
+# first probe after our start, a failed handshake; call 3 hangs to the deadline. Pinned at 4 s, so
+# that no later probe can put the handshake back and hide the loss. Into a file, for C6's reason.
 mac stopped
 shim_set info_ok_after 100000
+shim_set info_hang_at 3
 knobs 4 2
-out="$(launcher)"
+launch_bg
+launch_rc
+out="$(unbox "$(cat "$SHIM/l.out")")"
 knobs 20 10
-assert_says_key     "c4:after-our-start-says-restart-the-vm"     err.machine-unreachable "$out"
-assert_contains     "c4:quotes-what-podman-said-after-the-start" "ssh:handshakefailed" "$(unbox "$out")"
-assert_not_contains "c4:not-what-it-said-before-it"              "connectionrefused" "$(unbox "$out")"
+assert_says_key     "c4:after-our-start-says-restart-the-vm"     err.machine-unreachable "$(cat "$SHIM/l.out")"
+assert_contains     "c4:quotes-what-podman-said-after-the-start" "ssh:handshakefailed" "$out"
+assert_not_contains "c4:not-what-it-said-before-it"              "connectionrefused" "$out"
+if [ -s "$SHIM/info_hung.pid" ]; then pass "c4:a-probe-after-the-start-really-hung"
+else fail "c4:a-probe-after-the-start-really-hung" "no info call hung, so the silent-hang half measured nothing"; fi
+shim_kill_hung
 # ...and the same after a WAIT: the VM read `running` and refused, then went on failing the
 # handshake for the whole of the wait.
 mac running
@@ -404,75 +405,51 @@ if wait_until 15 said "$WAITING" "$SHIM/l.out"; then
     launch_rc
     l_out="$(cat "$SHIM/l.out")"
     assert_says_key     "c4:after-a-wait-says-restart-the-vm"     err.machine-unreachable "$l_out"
-    assert_contains     "c4:quotes-what-podman-said-during-the-wait" "ssh:handshakefailed" "$(unbox "$l_out")"
-    assert_not_contains "c4:not-what-it-said-before-it-after-a-wait" "connectionrefused" "$(unbox "$l_out")"
+    l_out="$(unbox "$l_out")"
+    assert_contains     "c4:quotes-what-podman-said-during-the-wait" "ssh:handshakefailed" "$l_out"
+    assert_not_contains "c4:not-what-it-said-before-it-after-a-wait" "connectionrefused" "$l_out"
 else
     launch_rc
     fail "c4:after-a-wait-says-restart-the-vm" "never waited: $(cat "$SHIM/l.out")"
 fi
 knobs 20 10
 
-# C5: CTRL-C WHILE WAITING ENDS THE WAITING TOO (#495 review). The wait is run_timeout's command, a
-# `&` subshell, and a non-interactive shell hands those SIGINT ignored -- so a Ctrl-C that ended
-# the launcher left that subshell asking podman twice a second until the deadline. Nothing may be
-# left in the launcher's process group once it has gone.
-mac starting
-launcher_fg_start
-if launcher_fg_wait 15 "$WAITING"; then
-    c5g="$(fg_group)"
-    launcher_fg_keys '\003'
-    launcher_fg_ended 10
-    assert_eq "c5:the-ctrl-c-landed" "signal 2" "$(launcher_fg_status)"
-    if wait_until 10 pgid_empty "$c5g"; then pass "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman"
+# C5: A KEY THAT ENDS THE LAUNCHER WHILE IT WAITS ENDS THE WAITING TOO (#495 review). The wait is
+# run_timeout's command, a `&` subshell, and a non-interactive shell hands those SIGINT and SIGQUIT
+# ignored -- so the key that ended the launcher left that subshell asking podman until the deadline.
+# The launcher must die of SIGNAL, and nothing may be left in its process group 3 s later. With HUNG,
+# the key waits until that call of podman-fake's has hung.
+key_while_waiting() {                 # key_while_waiting CASE KEY SIGNAL [HUNG]
+    local case="$1" key="$2" sig="$3" hung="${4:-}" g
+    mac starting
+    [ -n "$hung" ] && shim_set info_hang_at 2
+    launcher_fg_start
+    if launcher_fg_wait 15 "$WAITING" && { [ -z "$hung" ] || wait_until 15 test -s "$SHIM/$hung"; }; then
+        g="$(launcher_fg_pgid)"
+        launcher_fg_keys "$key"
+        launcher_fg_ended 10
+        assert_eq "$case:the-key-landed" "signal $sig" "$(launcher_fg_status)"
+        if wait_until 3 pgid_empty "$g"; then pass "$case:leaves-nothing-asking-podman"
+        else
+            fail "$case:leaves-nothing-asking-podman" \
+                 "still in group $g: $(group_story "$g"); podman asked $(shim_count '^info ') times"
+        fi
     else
-        fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" \
-             "still in group $c5g: $(group_story "$c5g"); podman asked $(shim_count '^info ') times"
+        fail "$case:leaves-nothing-asking-podman" "never got as far as the key: $(tail -3 "$FG_OUT")"
     fi
-else
-    fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$FG_OUT")"
-fi
-launcher_fg_stop
-
-# C5b: ...AND WHILE THE PROBE IN FLIGHT HANGS, the slept Mac's podman. The poller sits in that probe
-# for its whole ten-second ceiling and checks for a vanished launcher only between probes, so what
-# ends it in time is launcher_exit killing what preflight left in flight (#449's rt_kill_inflight).
-# Call 1 is preflight's own `info`; call 2 is the wait's first probe.
-mac starting
-shim_set info_hang_at 2
-launcher_fg_start
-if launcher_fg_wait 15 "$WAITING" && wait_until 15 test -s "$SHIM/info_hung.pid"; then
-    c5g="$(fg_group)"
-    launcher_fg_keys '\003'
-    launcher_fg_ended 10
-    assert_eq "c5b:the-ctrl-c-landed" "signal 2" "$(launcher_fg_status)"
-    if wait_until 3 pgid_empty "$c5g"; then pass "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running"
-    else
-        fail "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running" "still in group $c5g: $(group_story "$c5g")"
-    fi
-else
-    fail "c5b:ctrl-c-during-a-hung-probe-leaves-nothing-running" "the probe never hung: $(tail -3 "$FG_OUT")"
-fi
-launcher_fg_stop
-hung_reap
-
-# C5c: CTRL-\ WHILE WAITING. A QUIT runs no EXIT trap -- bash 3.2 and 5 both die of it outright --
-# so launcher_exit never runs, and machine_answer_by's own check for a vanished launcher is all
-# that ends the poller.
-mac starting
-launcher_fg_start
-if launcher_fg_wait 15 "$WAITING"; then
-    c5g="$(fg_group)"
-    launcher_fg_keys '\034'
-    launcher_fg_ended 10
-    assert_eq "c5c:the-ctrl-backslash-landed" "signal 3" "$(launcher_fg_status)"
-    if wait_until 3 pgid_empty "$c5g"; then pass "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman"
-    else
-        fail "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman" "still in group $c5g: $(group_story "$c5g")"
-    fi
-else
-    fail "c5c:ctrl-backslash-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$FG_OUT")"
-fi
-launcher_fg_stop
+    launcher_fg_stop
+    shim_kill_hung
+}
+# Ctrl-C WHILE THE PROBE IN FLIGHT HANGS, the slept Mac's podman. The poller sits in that probe for
+# its whole ten-second ceiling and checks for a vanished launcher only between probes, so what ends
+# it in time is launcher_exit killing what preflight left in flight (#449's rt_kill_inflight). Call 1
+# is preflight's own `info`; call 2 is the wait's first probe. (A Ctrl-C with no probe hung is this
+# with the kill and the check both able to end it, so it measured neither and was dropped.)
+key_while_waiting c5:ctrl-c-during-a-hung-probe '\003' 2 info_hung.pid
+# Ctrl-\ WHILE WAITING. A QUIT runs no EXIT trap -- bash 3.2 and 5 both die of it outright -- so
+# launcher_exit never runs, and machine_answer_by's own check for a vanished launcher is all that
+# ends the poller (#600).
+key_while_waiting c5b:ctrl-backslash-while-waiting '\034' 3
 
 # C6: A STATE READ THAT HANGS NEAR THE DEADLINE leaves nothing behind (#495 review). Two things hold
 # it now: the wait's own reads are clipped to what is left of it, so they finish inside the ceiling it
@@ -489,7 +466,7 @@ launch_bg
 launch_rc
 out="$(cat "$SHIM/l.out")"
 knobs 20 10
-hp="$(cat "$SHIM/machine_inspect_hung.pid" 2>/dev/null)"
+hp=''; read -r hp 2>/dev/null < "$SHIM/machine_inspect_hung.pid"
 if [ -z "$hp" ]; then
     fail "c6:a-hung-state-read-does-not-outlive-the-launcher" "the second state read never hung, so this measured nothing"
 elif [ "$(ps -ww -o command= -p "$hp" 2>/dev/null)" = 'sleep 3600' ]; then
@@ -497,28 +474,8 @@ elif [ "$(ps -ww -o command= -p "$hp" 2>/dev/null)" = 'sleep 3600' ]; then
 else
     pass "c6:a-hung-state-read-does-not-outlive-the-launcher"
 fi
-hung_reap
+shim_kill_hung
 assert_says_key "c6:and-it-still-says-it-is-starting" err.machine-still-starting "$out"
-
-# C7: A PROBE THAT HANGS WITHOUT A WORD keeps podman's last words (#495 review). Each failed probe
-# used to replace them, so a probe that timed out silently emptied them, and the refusal fell back to
-# the `info` from before the start. Call 1 is preflight's read of the stopped VM, refused; call 2 the
-# first probe after our start, a failed handshake; call 3 hangs to the deadline. Pinned at 4 s, so
-# that no later probe can put the handshake back and hide the loss.
-mac stopped
-shim_set info_ok_after 100000
-shim_set info_hang_at 3
-knobs 4 2
-launch_bg
-launch_rc
-out="$(cat "$SHIM/l.out")"
-knobs 20 10
-assert_says_key     "c7:says-restart-the-vm"                   err.machine-unreachable "$out"
-assert_contains     "c7:a-silent-hang-keeps-podmans-last-words" "ssh:handshakefailed" "$(unbox "$out")"
-assert_not_contains "c7:not-the-words-from-before-the-start"    "connectionrefused" "$(unbox "$out")"
-if [ -s "$SHIM/info_hung.pid" ]; then pass "c7:the-third-call-really-hung"
-else fail "c7:the-third-call-really-hung" "no info call hung, so this measured nothing"; fi
-hung_reap
 
 # ═══ D. a VM running that is not ours, or no target at all ══════════════════════
 # D1: another machine is up. Say which, at once -- there is nothing to wait for.
@@ -748,7 +705,7 @@ rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
 CS193V_PTY_NOSHELL=1 PATH="$SHIM:$PATH" \
     "$DO_PY" "$PT_LIB/ptyrun.py" "$COPY/cs193v" doctor < "$PTY_IN" > "$PTY_OUT" 2>&1 &
 g8pid=$!
-PTY_PIDS="$PTY_PIDS $g8pid"
+HOLDERS="$HOLDERS $g8pid"
 exec 7>"$PTY_IN"
 PASTE="$(msg_text doctor.paste)"
 OLDMENU='Restart the virtual machine to fix the clock'
@@ -843,7 +800,7 @@ else fail "i10:the-naive-control-was-built" "$naive_why"; fi
 # launcher's first probe reuses it for run_timeout's fifo, so nothing held there survives to the
 # start; I12 holds it on a direct call instead. The snapshot says what the VM inherited; the readers
 # say whether anything still holds the pipes once the launcher is gone.
-HELD_FDS='5 7 8'
+HELD_FDS='5 7 8'                      # and shape_with_fds' redirections below, which must match
 hold_fd() {                           # hold_fd N -> a pipe at $SHIM/heldN, $SHIM/heldN.eof at its EOF
     mkfifo "$SHIM/held$1"
     ( cat "$SHIM/held$1" >/dev/null; : > "$SHIM/held$1.eof" ) & HOLDERS="$HOLDERS $!"
@@ -853,12 +810,15 @@ shape_with_fds() {                    # shape_with_fds DIR
     for n in $HELD_FDS; do hold_fd "$n"; done
     LAUNCHER_DIR="$dir" launcher > "$SHIM/i1.out" 2>&1 5>"$SHIM/held5" 7>"$SHIM/held7" 8>"$SHIM/held8"
 }
-all_held_eof() { local n; for n in $HELD_FDS; do [ -e "$SHIM/held$n.eof" ] || return 1; done; }
-# Which of the held pipes are still waiting for EOF after up to SECS.
-held_open() {                         # held_open SECS -> "7 9" or ""
-    local n open=''
-    wait_until "$1" all_held_eof || :
-    for n in $HELD_FDS; do [ -e "$SHIM/held$n.eof" ] || open="$open $n"; done
+all_held_eof() { local n; for n in "$@"; do [ -e "$SHIM/held$n.eof" ] || return 1; done; }
+# Which of the held pipes FD... -- HELD_FDS, given none -- are still waiting for EOF after up to SECS.
+held_open() {                         # held_open SECS [FD...] -> "7 8" or ""
+    local secs="$1" n open=''
+    shift
+    # shellcheck disable=SC2086   # deliberately word-split: HELD_FDS is a list of fd numbers
+    [ "$#" -gt 0 ] || set -- $HELD_FDS
+    wait_until "$secs" all_held_eof "$@" || :
+    for n in "$@"; do [ -e "$SHIM/held$n.eof" ] || open="$open $n"; done
     printf '%s' "${open# }"
 }
 mac stopped
@@ -1033,8 +993,7 @@ direct_with_fd9() {                   # direct_with_fd9 DIR
 direct_with_fd9 "$COPY"
 if wait_until 10 vm_alive; then
     assert_eq "i12:a-direct-call-hands-the-vm-no-fd" "" "$(vm_snap | sed -n 's/.*fds=//p')"
-    if wait_until 5 test -e "$SHIM/held9.eof"; then pass "i12:and-the-callers-fd-9-reaches-eof"
-    else fail "i12:and-the-callers-fd-9-reaches-eof" "the VM holds the caller's fd 9"; fi
+    assert_eq "i12:and-the-callers-fd-9-reaches-eof" "" "$(held_open 5 9)"
 else
     fail "i12:a-direct-call-hands-the-vm-no-fd" "no fake VM came up: $(cat "$SHIM/i12.log" 2>/dev/null)"
 fi
@@ -1067,9 +1026,7 @@ holders_reap
 direct_with_fd9 "$NAIVE"
 if wait_until 10 vm_alive; then
     # Proving an absence: EOF that never comes is waited out.
-    if wait_until 3 test -e "$SHIM/held9.eof"; then
-        fail "i10:a-naive-direct-start-keeps-fd-9-open" "EOF arrived -- i12 cannot see a leak"
-    else pass "i10:a-naive-direct-start-keeps-fd-9-open"; fi
+    assert_eq "i10:a-naive-direct-start-keeps-fd-9-open" "9" "$(held_open 3 9)"
 else
     fail "i10:a-naive-direct-start-keeps-fd-9-open" "no VM came up in the naive copy"
 fi

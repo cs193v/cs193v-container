@@ -1157,11 +1157,12 @@ ensure_podman_path() {
 #                 VM runs, and a drive holding a process's directory will not eject (#573).
 #   * every fd above 2  Go does not close the fds it inherits, so the VM -- which lives for days --
 #                 would hold open whatever the caller had: run-tests.sh's 3 and 4, a caller's pipe,
-#                 the terminal copies the launcher keeps on 7 and 8 (#511). EVERY ONE, read off
-#                 /dev/fd, not 3..9 by name: bash 3.2 keeps copies of the fds a function call's
-#                 redirections touch, at numbers no script names, and they are NOT close-on-exec
-#                 above 2. run_timeout's `7>&- 8>&-` on this function's call (#511) handed the VM
-#                 the launcher's 7 and 8 again as 12 and 13 -- measured, with 31's i8 red.
+#                 whatever the launcher's own caller left on 7 and 8 -- keep_terminal_fds (#511)
+#                 puts the terminal there only after preflight. EVERY ONE, read off /dev/fd, not
+#                 3..9 by name: bash 3.2 keeps copies of the fds a function call's redirections
+#                 touch, at numbers no script names, and they are NOT close-on-exec above 2.
+#                 run_timeout's `7>&- 8>&-` on this function's call handed the VM those 7 and 8
+#                 again as 12 and 13 -- measured, with 31's i8 red (#601).
 #   * the waiter is the CALLER'S OWN SHELL, and `set -m` is put back the way the caller had it.
 #                 The first version made the whole body a `( )` subshell, which looked tidier and
 #                 hung things: that subshell is a second bash, it inherits the copy of the caller's
@@ -1195,7 +1196,7 @@ machine_start_detached() {
     # p INSIDE THE BRACES: were the 9>&2 to fail, the job never starts, and a $! read afterwards would
     # be some earlier job's -- the installer's meter animator, which a `wait` would then sit on.
     { (
-        exec 2>&9 9>&-
+        exec 2>&9
         # NEVER A TERMINAL ON 1 OR 2: nohup would answer one by writing nohup.out into the current
         # directory -- the student's course folder, which tunnel_start's comment already guards.
         # Both callers hand it files -- run_timeout in the launcher, and the installer its setup
@@ -1211,7 +1212,7 @@ machine_start_detached() {
         exec </dev/null
         for f in /dev/fd/*; do
             f="${f##*/}"
-            case "$f" in ''|*[!0-9]*|0|1|2) ;; *) eval "exec $f>&-" ;; esac
+            case "$f" in *[!0-9]*|0|1|2) ;; *) eval "exec $f>&-" ;; esac
         done
         # NOT THE CALLER'S DIRECTORY (#573). krunkit and gvproxy keep the directory they were
         # started in for as long as the VM runs, and a drive holding some process's directory

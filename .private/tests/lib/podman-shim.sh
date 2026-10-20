@@ -118,7 +118,11 @@ shim_count() {                        # shim_count ERE
 # shims per installer run (#76). The pid in every name is what lets one glob find exactly
 # ours and leave a concurrent run's alone.
 shim_cleanup() {
+    # A pty job a case left running first, since it may hold what the rest of this removes; it is
+    # a no-op once the case has stopped it itself.
+    launcher_fg_stop
     shim_kill_vms
+    shim_kill_hung
     rm -rf "$SHIM_SNAPSHOT" "$SHIM_FARM" \
            "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".* \
            "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* \
@@ -139,6 +143,20 @@ shim_kill_vms() {
         case "$p" in ''|*[!0-9]*) continue ;; esac
         # The fake's exact argv: lib/podman-fake starts it as `perl SHIM/vm-fake.pl SHIM`.
         kill_if_argv "$p" "perl ${f%/vm.pid}/vm-fake.pl ${f%/vm.pid}"
+    done
+    return 0
+}
+
+# Every call podman-fake HUNG in a shim of ours: its *_hang_at knobs turn the Nth call into
+# `sleep 3600` and record its pid as NAME_hung.pid, which this ends by that pid and that argv. Each
+# holds whatever the launcher handed it for an hour, so 31-machine-start.sh ends them as each case
+# finishes too, rather than leaving them all to the cleanup.
+shim_kill_hung() {
+    local f p
+    for f in "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/*_hung.pid; do
+        [ -f "$f" ] || continue
+        p=''; read -r p 2>/dev/null < "$f"
+        kill_if_argv "$p" 'sleep 3600' KILL
     done
     return 0
 }
@@ -332,6 +350,10 @@ launcher_fg_pid() {
     local PTY_PIDFILE="$FG_PIDFILE"
     pty_inner_pid
 }
+# ...and its process group, which is the whole job's: fgjob, the launcher and whatever the launcher
+# started that did not leave it. Read while the launcher is still there; lib/portable.sh's
+# pgid_empty then says when nothing is left in it.
+launcher_fg_pgid() { pid_pgid "$(launcher_fg_pid)"; }
 
 # `exit N` or `signal N` once the launcher has ended, nothing before. Waits up to SECS.
 launcher_fg_ended() {                 # launcher_fg_ended SECS
@@ -512,11 +534,23 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
 #
 # DIGITS OR NOTHING, as pty_inner_pid has it: an unreadable pid must read as no pid, never as a
 # value a comparison could pass on.
-vm_pid()   { local p; p="$(cat "$SHIM/vm.pid" 2>/dev/null | do_tr -d ' \n')"; case "$p" in ''|*[!0-9]*) ;; *) printf '%s' "$p" ;; esac; }
+vm_pid()   { local p=''; read -r p 2>/dev/null < "$SHIM/vm.pid"; case "$p" in ''|*[!0-9]*) ;; *) printf '%s' "$p" ;; esac; }
 vm_snap()  { cat "$SHIM/vm.snapshot" 2>/dev/null; }
 vm_alive() { local p; p="$(vm_pid)"; [ -n "$p" ] && ! pid_is_gone "$p"; }
 sid_of()   { case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
              "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
+
+# THE FOURTH DOOR (#543): the installer as a JOB on a pty, through fg_start -- a lingering leader
+# above it, the shape a Terminal window has, typed at with launcher_fg_keys when the case decides,
+# and how it ended in launcher_fg_status. The same two properties as the other three doors, held by
+# 10-static.sh the same way: HOME redirected, the shim first on PATH. Each VAR=VALUE is an argument
+# of its own to env, so no shell parses a checkout path again (#436).
+installer_job() {                     # installer_job SCRIPT [VAR=VALUE...] -> fg_start's job
+    local script="$1"; shift
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    fg_start env "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "$@" bash "$script"
+}
 
 # THE POSITIVE CONTROLS' HELPER: machine_start_detached in a COPY of cs193v-ui.sh replaced by the
 # plain `podman machine start` everything about it exists to replace -- in the caller's own process

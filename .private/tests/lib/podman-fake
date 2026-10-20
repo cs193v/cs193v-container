@@ -160,6 +160,20 @@ get() {                               # get KEY DEFAULT
     if [ -f "$SHIM/$1" ]; then cat "$SHIM/$1"; else printf '%s' "$2"; fi
 }
 
+# THE Nth CALL HANGS, for info_hang_at and machine_inspect_hang_at: every call bumps the count in
+# $SHIM/CALLS, and the one the knob names writes its pid to $SHIM/HUNG and becomes `sleep 3600` --
+# the pid and argv lib/podman-shim.sh's shim_kill_hung ends it by. No knob, no fork: this is on the
+# path of every `info` the fake answers.
+hang_at() {                           # hang_at KNOB CALLS HUNG
+    [ -f "$SHIM/$1" ] || return 0
+    read -r hn < "$SHIM/$1"
+    hc=0; [ -f "$SHIM/$2" ] && read -r hc < "$SHIM/$2"
+    hc=$((hc + 1)); echo "$hc" > "$SHIM/$2"
+    [ "$hc" -eq "$hn" ] || return 0
+    echo "$$" > "$SHIM/$3"
+    exec sleep 3600
+}
+
 [ -f "$SHIM/hang" ] && { while :; do sleep 5; done; }
 
 # hold_after_attach, header above. THE FIRST CALL AFTER THE ATTACH, whatever it is, rather than a
@@ -371,12 +385,7 @@ case "${1:-}" in
         ;;
 
     info)
-        iha="$(get info_hang_at '')"
-        if [ -n "$iha" ]; then
-            ihc=0; [ -f "$SHIM/info_hang_calls" ] && ihc="$(cat "$SHIM/info_hang_calls")"
-            ihc=$((ihc + 1)); echo "$ihc" > "$SHIM/info_hang_calls"
-            [ "$ihc" -eq "$iha" ] && { echo "$$" > "$SHIM/info_hung.pid"; exec sleep 3600; }
-        fi
+        hang_at info_hang_at info_hang_calls info_hung.pid
         [ -f "$SHIM/info_hang" ] && { while :; do sleep 5; done; }
         # WITH A MACHINE, podman's own failure for each state (#495), measured on 6.0.2: stdout
         # still carries the client half of the report, stderr says why. A booting VM is a
@@ -657,12 +666,7 @@ while os.path.exists(d + "/stop_hold"):
                     # the boot-window wait -- red on a Mac and green on Linux.
                     *State*)
                         [ -f "$SHIM/machine_inspect_hang" ] && { while :; do sleep 5; done; }
-                        ha="$(get machine_inspect_hang_at '')"
-                        if [ -n "$ha" ]; then
-                            mic=0; [ -f "$SHIM/machine_inspect_calls" ] && mic="$(cat "$SHIM/machine_inspect_calls")"
-                            mic=$((mic + 1)); echo "$mic" > "$SHIM/machine_inspect_calls"
-                            [ "$mic" -eq "$ha" ] && { echo "$$" > "$SHIM/machine_inspect_hung.pid"; exec sleep 3600; }
-                        fi
+                        hang_at machine_inspect_hang_at machine_inspect_calls machine_inspect_hung.pid
                         irc="$(get machine_inspect_rc 0)"
                         [ "$irc" -ne 0 ] && { echo "Error: cannot read machine configuration" >&2; exit "$irc"; }
                         ms="$(get machine_state '')"

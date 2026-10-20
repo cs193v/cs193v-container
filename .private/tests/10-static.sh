@@ -1158,7 +1158,8 @@ rm -rf "$ft_tmp"
 # reason no case had ever written there was that all four of them happened to spell
 # CS193V_DIR out by hand: a habit, one new call site away from being broken.
 #
-# So: exactly one helper may start the installer, and it sets HOME as well. `bash -n` is
+# So: only the named doors in lib/podman-shim.sh may start the installer -- installer_host,
+# installer_tty, installer_pipe and installer_job -- and each sets HOME as well. `bash -n` is
 # excluded because it parses without executing, which is a syntax check and not a run.
 # THE NEEDLE IS ASSEMBLED TAIL-FIRST, and that is not style: written out in one piece it
 # would match this very line and the rule would fail on its own definition forever. With
@@ -1187,11 +1188,7 @@ door_tail='install'; door_head='bash '
 bare="$(lint_grep --skip-comments -e "$door_head.*$door_tail" -- "$PRIVATE"/tests/[0-9][0-9]-*.sh \
         | grep -v 'bash -n' | grep -v 'wine_argv_count' \
         | grep -v -- 'install-cs193v.sh" -' \
-        | grep -vE 'installer_host|installer_tty|installer_pipe' \
-        | grep -vF 'fg_start env "HOME=$SHIM/home" "PATH=$SHIM:$PATH"')"
-# THE FOURTH DOOR'S LINE IS EXCUSED BY WHAT IT SAYS, not where it is: 25's course_job starts the
-# installer through fg_start on one line that redirects HOME and puts the shim first -- the two
-# properties installer-door:job-* pins in course_job below -- so a line that carries both is a door.
+        | grep -vE 'installer_host|installer_tty|installer_pipe|installer_job')"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
 # And the door has to do the thing it exists for. Extraction asserted first: an empty
@@ -1227,12 +1224,12 @@ assert_contains "installer-door:pipe-puts-the-shim-first" 'sh_quote "HOME=$SHIM/
 # would go green against a seekable script, which is the one thing they are not about.
 assert_contains "installer-door:pipe-feeds-the-script-on-stdin" 'cat $(sh_quote "$script") |' "$pipedoor"
 
-# And the fourth, the installer as a job on a pty, typed at when a case decides (#543): 25's
-# course_job, around lib/podman-shim.sh's fg_start. Same two properties, the same way -- each as an
-# argument of its own to env, which no shell parses again (#436).
-jobdoor="$(sed -n '/^course_job()/,/^}$/p' "$PRIVATE/tests/25-installer.sh")"
+# And the fourth, the installer as a job on a pty, typed at when a case decides (#543): a thin
+# installer_job around fg_start. Same two properties, the same way -- each as an argument of its own
+# to env, which no shell parses again (#436).
+jobdoor="$(sed -n '/^installer_job()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
 if [ "$(printf '%s' "$jobdoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:job-extractable"
-else fail "installer-door:job-extractable" "could not find course_job in 25-installer.sh"; fi
+else fail "installer-door:job-extractable" "could not find installer_job"; fi
 assert_contains "installer-door:job-redirects-HOME"      '"HOME=$SHIM/home"' "$jobdoor"
 assert_contains "installer-door:job-puts-the-shim-first" '"PATH=$SHIM:$PATH"' "$jobdoor"
 
@@ -4219,24 +4216,19 @@ assert_before "teardown:kills-the-interrupted-call-first" "$guard_code" rt_kill_
 
 # AND THE LAUNCHER'S OWN EXIT DOES THE SAME FOR PREFLIGHT (#495 review): a Ctrl-C during the VM wait
 # or a probe ends the launcher before any arm exists, inside a run_timeout. Gated on a flag that only
-# preflight holds -- set as its first act, cleared at both its ways out -- because this trap ends every
-# other path before the arms too, and those were never measured. Pinned in each part, since each is a
-# one-line edit away from a kill that is never armed or never disarmed.
+# preflight holds -- preflight is a wrapper that sets it, runs preflight_checks and clears it --
+# because this trap ends every other path before the arms too, and those were never measured. Pinned
+# in each part, since each is a one-line edit away from a kill that is never armed or never disarmed.
 le_code="$(fn_code launcher_exit "$REPO/cs193v")"
 assert_before "teardown:the-launchers-exit-kills-before-it-cleans" "$le_code" \
               '[ -n "$KILL_INFLIGHT_AT_EXIT" ] && rt_kill_inflight' transient_cleanup
 assert_eq "teardown:the-launchers-exit-is-the-top-level-trap" "1" \
           "$(grep -cx 'trap launcher_exit EXIT' "$REPO/cs193v")"
-pf_code="$(fn_code preflight "$REPO/cs193v" | grep -v '^[[:space:]]*$')"
-assert_eq "teardown:preflight-arms-the-kill-first" "KILL_INFLIGHT_AT_EXIT=1" \
-          "$(printf '%s\n' "$pf_code" | sed -n '2p' | sed 's/^[[:space:]]*//')"
-assert_eq "teardown:preflight-disarms-it-at-the-end" "KILL_INFLIGHT_AT_EXIT=''" \
-          "$(printf '%s\n' "$pf_code" | tail -2 | head -1 | sed 's/^[[:space:]]*//')"
-# EVERY return in it disarms first: the line before each one clears the flag.
-pf_bad="$(printf '%s\n' "$pf_code" | do_awk '/^[[:space:]]*return/ && prev !~ /KILL_INFLIGHT_AT_EXIT='"''"'/ { print NR": "$0 } { prev = $0 }')"
-assert_eq "teardown:preflight-disarms-it-before-every-return" "" "$pf_bad"
-if printf '%s\n' "$pf_code" | grep -q '^[[:space:]]*return'; then pass "teardown:preflight-has-a-return-to-check"
-else fail "teardown:preflight-has-a-return-to-check" "no return found in preflight -- has the carve moved?"; fi
+# THE WHOLE OF preflight IS THE WRAPPER, so no early return inside the checks can leave it armed.
+assert_eq "teardown:preflight-is-only-the-armed-checks" "KILL_INFLIGHT_AT_EXIT=1
+preflight_checks \"\$@\"
+KILL_INFLIGHT_AT_EXIT=''" \
+          "$(fn_code preflight "$REPO/cs193v" | grep -v '^[[:space:]]*$' | sed '1d;$d' | sed 's/^[[:space:]]*//')"
 
 # THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
 # rather than merely present: both lines in the wrong sequence would wipe a row of the student's
@@ -4356,7 +4348,7 @@ assert_not_contains "probe:it-does-not-prepend" '$d:$PATH' "$probe_body"
 
 # BOTH PROBERS REPAIR, and neither inherits the other's repair: verb_doctor deliberately does
 # not call preflight, because its job is reporting on a machine preflight would refuse.
-preflight_body="$(fn_body preflight "$REPO/cs193v")"
+preflight_body="$(fn_body preflight_checks "$REPO/cs193v")"
 doctor_body="$(fn_body verb_doctor "$REPO/cs193v")"
 assert_ne "probe:preflight-is-extractable" "" "$preflight_body"
 assert_ne "probe:doctor-is-extractable"    "" "$doctor_body"
@@ -5622,13 +5614,13 @@ if carve_func "$PRIVATE/files/cs193v-ui.sh" machine_start_detached "$ms_tmp/help
     # launcher's 7 and 8 through to the VM as 12 and 13 (#495 review, 31's i8).
     assert_contains "machine:helper-closes-every-fd-above-2" 'for f in /dev/fd/*; do' "$ms_h"
     assert_contains "machine:helper-closes-each-one-it-finds" \
-                    'case "$f" in '"''"'|*[!0-9]*|0|1|2) ;; *) eval "exec $f>&-" ;; esac' "$ms_h"
+                    'case "$f" in *[!0-9]*|0|1|2) ;; *) eval "exec $f>&-" ;; esac' "$ms_h"
     # BASH'S OWN FORK-TIME COMPLAINT GOES NOWHERE (5e2dcb8's rule for run_timeout's bracket): the
     # fork happens with stderr on /dev/null and the caller's carried in on 9, and putting it back is
     # the job's first act -- anything said before that would be lost.
     assert_contains "machine:the-start-forks-with-bashs-stderr-on-dev-null" ') & p=$!; } 9>&2 2>/dev/null' "$ms_h"
-    assert_eq "machine:the-job-puts-the-callers-stderr-back-first" 'exec 2>&9 9>&-' \
-              "$(printf '%s\n' "$ms_h" | sed 's/^[[:space:]]*#.*//' | grep -v '^[[:space:]]*$' \
+    assert_eq "machine:the-job-puts-the-callers-stderr-back-first" 'exec 2>&9' \
+              "$(printf '%s\n' "$ms_h" | grep -v '^[[:space:]]*$' \
                  | grep -A1 -xF '    { (' | sed -n '2p' | sed 's/^[[:space:]]*//')"
 else
     fail "machine:helper-gives-the-start-its-own-process-group" \
