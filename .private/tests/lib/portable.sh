@@ -296,6 +296,25 @@ pid_pgid() {                          # pid_pgid PID
     ps -p "${1:-0}" -o pgid= 2>/dev/null | do_tr -d ' \n'
 }
 
+# pgid_empty PGID -> 0 once no live process is left in group PGID, 1 while one is. 2, and why on
+# stderr, for what cannot be measured: a PGID that is not one, a `ps` that answered nothing, or this
+# suite's own group -- never empty, so a wait on it could not pass, and a caller that went on to
+# signal it would take the run down with it. A ZOMBIE IS GONE: it holds a pid until it is reaped,
+# not a process anybody can still be talking to. Read the group BEFORE the key, while a pid is still
+# there to read it from.
+pgid_empty() {                        # pgid_empty PGID
+    local rows
+    case "${1:-}" in
+        ''|*[!0-9]*) printf 'pgid_empty: not a process group: [%s]\n' "${1:-}" >&2; return 2 ;;
+    esac
+    if [ "$1" = "$(pid_pgid $$)" ]; then
+        printf 'pgid_empty: %s is this suite'\''s own process group\n' "$1" >&2; return 2
+    fi
+    rows="$(ps -A -o pgid= -o stat= 2>/dev/null)"
+    [ -n "$rows" ] || { printf 'pgid_empty: ps listed nothing\n' >&2; return 2; }
+    printf '%s\n' "$rows" | do_awk -v g="$1" '$1 == g && $2 !~ /^Z/ { live = 1 } END { exit live ? 1 : 0 }'
+}
+
 # kill_if_argv PID ARGV [SIGNAL] -> signals PID only while its command line is exactly ARGV.
 # IDENTIFIED BEFORE KILLED, cs193v's tunnel_kill_pid's rule: a pid a test recorded is free again
 # once that process has gone, and can be another lane's by cleanup time. -ww, because procps cuts a

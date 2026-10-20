@@ -392,7 +392,8 @@ lt="$( RT_SPIN='first label'; RT_SPIN_AT=3; RT_SPIN_LATER='second label'
 assert_eq           "rt:later-a-quick-command-keeps-its-status"  "4" "$RC"
 assert_not_contains "rt:later-a-quick-command-never-sees-it"     "second label" "$lt"
 assert_exit         "rt:later-the-ceiling-still-returns-124" 124 \
-                    bash -c ". '$PRIVATE/files/cs193v-ui.sh'; RT_SPIN=a RT_SPIN_AT=1 RT_SPIN_LATER=b; run_timeout 2 sleep 5 >/dev/null"
+                    bash -c '. "$1"; RT_SPIN=a RT_SPIN_AT=1 RT_SPIN_LATER=b; run_timeout 2 sleep 5 >/dev/null' \
+                    _ "$PRIVATE/files/cs193v-ui.sh"
 # WITHOUT A FIRST LABEL THERE IS NOTHING TO CHANGE, and a stray RT_SPIN_LATER must not start drawing
 # on a probe's behalf. ON THE POLL BRANCH, which is the only one with the later-label code in it: a
 # probe with no RT_SPIN normally takes the fifo branch and could not draw if it tried, so this case
@@ -420,8 +421,14 @@ else fail "rt:slow-ticks-do-not-stretch-the-ceiling" "a 3 s ceiling took ${took}
 
 # ON A TERMINAL the row is redrawn in place, and a shorter second label must not leave the tail of
 # the longer first one behind -- the row a student reads afterwards is the label in effect at the
-# end, and nothing else.
-lt="$(do_script 20 "bash -c '. \"$PRIVATE/files/cs193v-ui.sh\"; RT_SPIN=\"a much longer first label\"; RT_SPIN_AT=1; RT_SPIN_LATER=short; run_timeout 5 sleep 2; echo done'" 2>&1 | render_pty)"
+# end, and nothing else. A SCRIPT FILE AND ITS PATHS IN THE ENVIRONMENT, so that nothing a pty's shell
+# parses again carries the checkout's path (#436).
+cat > "$WORK/later-redraw.sh" <<'SUBJECT'
+. "$RL_UI"
+RT_SPIN='a much longer first label'; RT_SPIN_AT=1; RT_SPIN_LATER=short
+run_timeout 5 sleep 2; echo done
+SUBJECT
+lt="$(RL_UI="$PRIVATE/files/cs193v-ui.sh" do_script 20 "$(sh_quote bash "$WORK/later-redraw.sh")" 2>&1 | render_pty)"
 lrow="$(printf '%s\n' "$lt" | grep -F 'short' | tail -1)"
 case "$lrow" in
     '')        fail "rt:later-redraws-the-row-on-a-terminal" "no row carries the second label: $lt" ;;
@@ -438,7 +445,13 @@ assert_not_contains "rt:later-leaves-the-first-label-behind-it-on-a-terminal" \
 # 40 s it is up. Read off the RAW frames, because render_pty does not model wrapping: every piece of
 # output that carries a spinner glyph must fit in one column less than the pty.
 LONGLBL='a label that is a good deal longer than forty columns of terminal'
-lt="$(CS193V_PTY_COLS=40 do_script 20 "bash -c '. \"$PRIVATE/files/cs193v-ui.sh\"; RT_SPIN=short; RT_SPIN_AT=0; RT_SPIN_LATER=\"$LONGLBL\"; run_timeout 5 sleep 1; echo done'" 2>&1)"
+cat > "$WORK/wide-label.sh" <<'SUBJECT'
+. "$RL_UI"
+RT_SPIN=short; RT_SPIN_AT=0; RT_SPIN_LATER="$RL_LATER"
+run_timeout 5 sleep 1; echo done
+SUBJECT
+lt="$(CS193V_PTY_COLS=40 RL_UI="$PRIVATE/files/cs193v-ui.sh" RL_LATER="$LONGLBL" \
+      do_script 20 "$(sh_quote bash "$WORK/wide-label.sh")" 2>&1)"
 widest="$(printf '%s' "$lt" | "$DO_PY" -c '
 import re, sys
 raw = sys.stdin.buffer.read().decode("utf-8", "replace")

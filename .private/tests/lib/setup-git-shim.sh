@@ -561,9 +561,8 @@ sg_has_not() { assert_not_contains "$1" "$2" "$(sg_plain "$3")"; }
 #
 # A token contains no whitespace, so deleting all of it is lossless for this one question and
 # cannot manufacture a false negative. Use this, not _flatten, whenever the needle is a secret.
-sg_unwrap() {                         # sg_unwrap TEXT -> box art and ALL whitespace removed
-    printf '%s' "$1" | do_tr -d '\n' | sed -e 's/[┃┏┓┗┛━]//g' -e 's/[[:space:]]//g'
-}
+# lib/assert.sh's unbox, under the name 35 and 90 call it by.
+sg_unwrap() { unbox "$1"; }           # sg_unwrap TEXT -> box art and ALL whitespace removed
 
 sg_box() {                            # sg_box TEXT -> just the box, ready for box_problems
     printf '%s' "$1" | do_tr -d '\r' | LC_ALL=C sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" -e 's/^  //' \

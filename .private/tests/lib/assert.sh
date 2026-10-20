@@ -216,6 +216,17 @@ _flatten() {
         | sed -e 's/[┃┏┓┗┛━]//g' -e 's/[[:space:]][[:space:]]*/ /g'
 }
 
+# _flatten's other half: the box's decoration AND EVERY BIT OF WHITESPACE removed, for a needle a
+# wrap can split MID-TOKEN -- a path, a quoted podman line -- which _flatten's joining space would
+# leave split. Unbox both sides of the comparison. One definition, where there were four (#495
+# review): setup-git's sg_unwrap, 16's squash_ws, 30's squash and 31's unboxed. EACH GLYPH IS ITS OWN
+# STRING, not a [bracket]: a C locale reads a bracket of multibyte glyphs as a set of bytes, and
+# deletes those bytes out of anything else that carries them -- an é in a hostile path among them.
+unbox() {                             # unbox TEXT -> TEXT, unboxed and with no whitespace at all
+    printf '%s' "$1" | sed -e 's/┃//g' -e 's/┏//g' -e 's/┓//g' -e 's/┗//g' -e 's/┛//g' -e 's/━//g' \
+        | do_tr -d '[:space:]'
+}
+
 assert_says() {                       # assert_says NAME PHRASE TEXT
     _checker_ok "$1" "$2" "$3" || return 0
     local hay; hay="$(_flatten "$3")"

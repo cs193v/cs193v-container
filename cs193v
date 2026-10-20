@@ -228,7 +228,23 @@ transient_cleanup() {
     # And the build's copy of its context, which a failed or interrupted build leaves behind.
     build_ctx_remove
 }
-trap transient_cleanup EXIT
+# THE LAUNCHER'S OWN EXIT, until open_shell or verb_rebuild arms handlers of their own: the cleanup
+# above and, during preflight, the call that was in flight. A Ctrl-C there ends the launcher from
+# inside a run_timeout, and what that call started -- a podman hung on a slept Mac, the fifo
+# branch's wrapper, the VM wait's `&` subshell and the probe inside it (#495 review) -- ran on
+# without it, holding the launcher's stdout, asking podman until its own ceiling. shell_teardown
+# kills them for the same reason (#449); see rt_kill_inflight.
+#
+# PREFLIGHT ONLY, by KILL_INFLIGHT_AT_EXIT, because this trap is also what ends every other path
+# before the arms -- create's three-minute `podman run`, --stop's stop, rebuild_interrupted's exits
+# -- and what killing those mid-call would do to the container has not been measured. Not a
+# QUIT or a SIGKILL either, which run no EXIT trap: machine_answer_by watches for those itself.
+KILL_INFLIGHT_AT_EXIT=''
+launcher_exit() {
+    [ -n "$KILL_INFLIGHT_AT_EXIT" ] && rt_kill_inflight
+    transient_cleanup
+}
+trap launcher_exit EXIT
 
 warn() {
     printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2
@@ -1035,9 +1051,11 @@ machine_answer_by() {                 # machine_answer_by END [stop] -> 0 answer
     MA_ERR=''
     while :; do
         # A LAUNCHER THAT HAS GONE ends the wait (#495 review). As machine_wait's command this loop
-        # is a `&` subshell, which a shell without job control hands SIGINT ignored -- so the Ctrl-C
-        # that ends the launcher does not end this, and it went on asking podman until END. $$ is
-        # still the launcher's pid in here; in the launcher's own shell it is always alive.
+        # is a `&` subshell, which a shell without job control hands SIGINT and SIGQUIT ignored -- so
+        # the key that ends the launcher does not end this. A Ctrl-C, a closed window or a TERM run
+        # launcher_exit, which kills it; a Ctrl-\ or a force-quit run no EXIT trap at all, and this
+        # is what stops them leaving it asking podman until END. $$ is still the launcher's pid in
+        # here; in the launcher's own shell it is always alive.
         kill -0 "$$" 2>/dev/null || return 1
         n=$(( $1 - SECONDS ))
         [ "$n" -ge 1 ] || return 1
@@ -1178,6 +1196,8 @@ machine_recover() {                   # machine_recover MODE INFO_RC INFO_STDERR
 #   (none)  the refusal, as before.
 MACHINE_DOWN=''
 preflight() {
+    # FIRST, and cleared at both ways out; see launcher_exit.
+    KILL_INFLIGHT_AT_EXIT=1
     if [ "$(id -u)" -eq 0 ]; then die "$(msg err.running-as-root)"; fi
 
     # ISSUE #121, see ensure_podman_path. AFTER the root refusal and BEFORE every podman probe:
@@ -1230,6 +1250,7 @@ preflight() {
     # makes itself, so a false here can mean nothing else.
     if [ "$info_rc" -ne 0 ] && ! machine_recover "${1:-}" "$info_rc" "$RT_ERR"; then
         MACHINE_DOWN=1
+        KILL_INFLIGHT_AT_EXIT=''
         return 0
     fi
     # THREE ANSWERS WHERE THERE WERE TWO. `!= "true"` inferred "rootful" from every answer that
@@ -1252,6 +1273,7 @@ preflight() {
     fi
 
     [ -d "$WORKSPACE" ] || mkdir -p "$WORKSPACE" || die "$(msg err.no-workspace DIR="$WORKSPACE")"
+    KILL_INFLIGHT_AT_EXIT=''
 }
 
 # ─── container state ───────────────────────────────────────────────────────────

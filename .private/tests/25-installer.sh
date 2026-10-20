@@ -181,7 +181,7 @@ HOME_AT_START="$(home_state)"
 record "door:the-real-home-at-suite-start" "$HOME_AT_START"
 
 door_check() { assert_eq "door:the-real-home-is-as-we-found-it" "$HOME_AT_START" "$(home_state)"; }
-trap 'door_check; rm -rf "$TMP"; shim_cleanup' EXIT
+trap 'launcher_fg_stop; door_check; rm -rf "$TMP"; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
 # ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
@@ -1693,7 +1693,8 @@ assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 # Every start now goes through machine_start_detached, and these cases run the installer against
 # the fake's #495 mode, where `machine start` leaves a lib/vm-fake.pl behind under Go's signal rule
 # and its snapshot says what the VM inherited. The questions are 31-machine-start.sh's, and both
-# suites ask them through lib/podman-shim.sh's vm_pid, vm_snap, vm_alive, pgid_of and sid_of.
+# suites ask them through lib/podman-shim.sh's vm_pid, vm_snap, vm_alive and sid_of, and
+# lib/portable.sh's pid_pgid.
 
 # A Mac whose VM the fake models, in THIS shell so that $SHIM still names it afterwards -- mac_run
 # makes its shim inside $( ), which is right for a transcript and useless for a pid file.
@@ -1706,9 +1707,9 @@ vm_mac() {                            # vm_mac [KEY VALUE]...
 
 # What the VM a run left behind inherited. THE SESSION LEADER IS THE INSTALLER on both doors --
 # nosid.py makes it one, and so does ptyrun's default shape -- so a VM still in the installer's
-# group has pgid == sid, and a detached one does not. Fds 3-9, as 31's I1 reads them.
+# group has pgid == sid, and a detached one does not. No fd above 2, as 31's I1 reads them.
 vm_detached() {                       # vm_detached NAME TRANSCRIPT
-    local name="$1" out="$2" vp snap low
+    local name="$1" out="$2" vp snap
     if ! wait_until 10 vm_alive; then
         fail "$name:a-vm-came-up" "no live vm-fake: $(printf '%s\n' "$out" | tail -3)"
         return 0
@@ -1717,10 +1718,8 @@ vm_detached() {                       # vm_detached NAME TRANSCRIPT
     snap="$(vm_snap)"; vp="$(vm_pid)"
     assert_contains "$name:the-vm-ignores-sighup" "HUP=IGNORE" "$snap"
     assert_contains "$name:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
-    low="$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p' | do_tr ',' '\n' \
-           | awk '$1 >= 3 && $1 <= 9' | do_tr '\n' ' ')"
-    assert_eq "$name:the-vm-inherited-no-fd-3-to-9" "" "$low"
-    assert_ne "$name:the-vm-is-not-in-the-installers-group" "$(sid_of "$vp")" "$(pgid_of "$vp")"
+    assert_eq "$name:the-vm-inherited-no-fd-above-2" "" "$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
+    assert_ne "$name:the-vm-is-not-in-the-installers-group" "$(sid_of "$vp")" "$(pid_pgid "$vp")"
     assert_not_contains "$name:no-job-control-complaint" "job control" "$out"
 }
 
@@ -1729,7 +1728,7 @@ vm_detached() {                       # vm_detached NAME TRANSCRIPT
 vm_mac
 PATH="$SHIM:$PATH" podman machine init --memory 8192 --disk-size 64 --now </dev/null >/dev/null 2>&1
 if wait_until 10 vm_alive; then pass "fake:init-now-starts-the-vm"; else fail "fake:init-now-starts-the-vm" "no vm-fake"; fi
-assert_eq "fake:init-now-leaves-it-in-the-inits-group" "$(pgid_of $$)" "$(pgid_of "$(vm_pid)")"
+assert_eq "fake:init-now-leaves-it-in-the-inits-group" "$(pid_pgid $$)" "$(pid_pgid "$(vm_pid)")"
 vm_mac
 PATH="$SHIM:$PATH" podman machine init --memory 8192 --disk-size 64 </dev/null >/dev/null 2>&1
 # Proving an absence: a start that is not coming has nothing to poll for.
@@ -1781,20 +1780,19 @@ assert_says_key "mac-resize:a-failed-restart-refuses"          err.machine-resta
 assert_says     "mac-resize:a-failed-restart-carries-podmans-words" "the VM would not boot" "$out"
 
 # ─── ...and a Ctrl-C or a closed window afterwards leaves it running  (#543) ───
-# THE BEHAVIOUR ITSELF, through installer_job: the installer as a job on a pty, the shape a Terminal
-# window has, typed at when the case decides. 31-machine-start.sh's pty_launch, aimed at the
-# installer.
-PTY_PIDS=''
-pty_reap() { local p; for p in $PTY_PIDS; do kill "$p" 2>/dev/null || true; done; PTY_PIDS=''; }
-trap 'pty_reap; door_check; rm -rf "$TMP"; shim_cleanup' EXIT
+# THE BEHAVIOUR ITSELF: the installer as a job on a pty, the shape a Terminal window has, typed at
+# when the case decides -- lib/podman-shim.sh's fg_start around the bootstrap, so the installer gets
+# a student's signal dispositions and the case learns how it ended. Each `VAR=VALUE` is its own
+# argument to env, and nothing is spliced into a string a shell parses again (#436).
 course_job() {                        # course_job TARBALL -> the installer, as a job, from TARBALL
-    installer_job "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$1" CS193V_DIR="$SHIM/dest"
-    PTY_PIDS="$PTY_PIDS $PTY_PID"
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    fg_start env "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "CS193V_TARBALL=$1" "CS193V_DIR=$SHIM/dest" bash "$PRIVATE/install-cs193v.sh"
 }
-# pty_type, pty_close, pty_end and pty_said are lib/podman-shim.sh's.
-# The installer and everything it ran live under the shim: its boot tree in $SHIM/tmp, the course
-# tree and its launcher in $SHIM/dest. The fake VM is $SHIM/vm-fake.pl, so it is not counted.
-installer_gone() { ! pgrep -f "$SHIM/(tmp|dest)/" >/dev/null 2>&1; }
+# The installer's process group, read while it is there to read it from: the installer and
+# everything it ran -- its boot tree, the course's launcher, their podman calls -- and never the VM,
+# which the helper starts in a group of its own. Empty once all of them are gone.
+course_group() { pid_pgid "$(launcher_fg_pid)"; }
 
 # THE NAIVE INSTALLER, for the positive controls: the same tree with its helper replaced by the
 # plain start everything above exists to replace -- lib/podman-shim.sh's shim_naive_helper, which
@@ -1812,19 +1810,22 @@ STARTING_VM="$(msg_text meter.vm-starting "$ICAT")"
 # (Ctrl-C typed) or `close` (the polite close). The first --rebuild is stretched by build_delay so
 # that the installer is still in it when the keystroke lands.
 vm_interrupt() {
-    local tarball="$1" how="$2" vp
+    local tarball="$1" how="$2" vp g
     vm_mac build_delay 0.5
     course_job "$tarball"
+    VI_END=''
     # EVERY NON-ANSWER SAYS WHAT IT SAW, read when it is known rather than up front: a flake in
     # here is only diagnosable from the line that reports it.
-    if ! wait_until 120 pty_said "$BUILDING"; then
-        VI_RESULT="never-reached-the-build ($(wc -c < "$PTY_OUT" | do_tr -d ' ') bytes): $(vm_story)"
+    if ! launcher_fg_wait 120 "$BUILDING"; then
+        VI_RESULT="never-reached-the-build ($(wc -c < "$FG_OUT" | do_tr -d ' ') bytes): $(vm_story)"
     elif ! wait_until 10 vm_alive; then
         VI_RESULT="no-live-vm-at-the-build: $(vm_story)"
     else
-        vp="$(vm_pid)"
-        case "$how" in int) pty_type '\003' ;; close) pty_close ;; esac
-        if wait_until 20 installer_gone; then
+        vp="$(vm_pid)"; g="$(course_group)"
+        case "$how" in int) launcher_fg_keys '\003' ;; close) launcher_fg_close ;; esac
+        launcher_fg_ended 20 || :
+        VI_END="$(launcher_fg_status)"
+        if wait_until 20 pgid_empty "$g"; then
             # Proving an absence: the signal has landed; the VM either went with it or did not.
             sleep 2
             if [ "$(vm_pid)" = "$vp" ] && vm_alive; then VI_RESULT=alive
@@ -1833,7 +1834,7 @@ vm_interrupt() {
             VI_RESULT="the-installer-did-not-exit: $(vm_story)"
         fi
     fi
-    pty_end
+    launcher_fg_stop
 }
 # What a case needs to say when the VM is not where it expected: the pid file, that pid's state,
 # the fake's machine state and the last calls podman was asked.
@@ -1841,9 +1842,10 @@ vm_story() {
     printf 'vm.pid=%s state=%s machine_state=%s last-calls=[%s] screen=[%s]' \
         "$(vm_pid)" "$(pid_state "$(vm_pid)")" "$(cat "$SHIM/machine_state" 2>/dev/null)" \
         "$(tail -4 "$SHIM/argv.log" 2>/dev/null | do_tr '\n' ';')" \
-        "$(strip_ansi < "$PTY_OUT" 2>/dev/null | do_tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -2 | do_tr '\n' ';')"
+        "$(strip_ansi 2>/dev/null < "$FG_OUT" | do_tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -2 | do_tr '\n' ';')"
 }
 vm_interrupt "$TMP/course.tar.gz" int
+assert_eq "vmsurvives:the-ctrl-c-landed" "signal 2" "$VI_END"
 assert_eq "vmsurvives:ctrl-c-during-the-first-build-leaves-the-vm-running" "alive" "$VI_RESULT"
 vm_interrupt "$TMP/course.tar.gz" close
 assert_eq "vmsurvives:a-closed-window-during-the-first-build-leaves-the-vm-running" "alive" "$VI_RESULT"
@@ -1857,19 +1859,21 @@ assert_match "vmsurvives-naive:a-closed-window-kills-a-plainly-started-vm" '^dea
 vm_mac
 shim_touch machine_start_hold
 course_job "$TMP/course.tar.gz"
-if wait_until 120 pty_said "$STARTING_VM" && wait_until 10 vm_alive; then
-    pty_type '\003'
-    if wait_until 20 installer_gone; then pass "vmsurvives:ctrl-c-during-the-start-ends-the-installer"
-    else fail "vmsurvives:ctrl-c-during-the-start-ends-the-installer" "still running: $(tail -3 "$PTY_OUT")"; fi
+if launcher_fg_wait 120 "$STARTING_VM" && wait_until 10 vm_alive; then
+    g="$(course_group)"
+    launcher_fg_keys '\003'
+    launcher_fg_ended 20 || :
+    if wait_until 20 pgid_empty "$g"; then pass "vmsurvives:ctrl-c-during-the-start-ends-the-installer"
+    else fail "vmsurvives:ctrl-c-during-the-start-ends-the-installer" "still running: $(tail -3 "$FG_OUT")"; fi
     rm -f "$SHIM/machine_start_hold"
     wait_until 10 eval '[ "$(cat "$SHIM/machine_state" 2>/dev/null)" = running ]'
     assert_eq "vmsurvives:and-the-start-finishes-without-it" "running" "$(cat "$SHIM/machine_state" 2>/dev/null)"
     if vm_alive; then pass "vmsurvives:with-the-vm-alive"; else fail "vmsurvives:with-the-vm-alive" "the VM died"; fi
 else
-    fail "vmsurvives:ctrl-c-during-the-start-ends-the-installer" "never showed the start: $(tail -3 "$PTY_OUT")"
+    fail "vmsurvives:ctrl-c-during-the-start-ends-the-installer" "never showed the start: $(tail -3 "$FG_OUT")"
 fi
 rm -f "$SHIM/machine_start_hold"
-pty_end
+launcher_fg_stop
 
 # ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
 # 80% of 8192 is 6553, so 4096 is under it and 16384 is over.

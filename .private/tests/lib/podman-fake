@@ -105,11 +105,16 @@
 #                           differently
 #   machine_inspect_rc     exit code for `machine inspect` itself                     [0]
 #   machine_inspect_hang   present = `machine inspect` sleeps forever
-#   machine_inspect_hang_at  N: the Nth `machine inspect` state read sleeps forever and every
-#                          other one answers -- a hang that arrives mid-wait rather than at the start
+#   machine_inspect_hang_at  N: the Nth `machine inspect` state read hangs and every other one
+#                          answers -- a hang that arrives mid-wait rather than at the start. The hung
+#                          call writes its pid to machine_inspect_hung.pid and becomes `sleep 3600`,
+#                          so a test can name it, and kill it, by that pid and argv alone.
 #   info_hang        present = `podman info` ALONE sleeps forever: the slept Mac, where podman
 #                    answers --version and then hangs on the first real question. `hang` hangs
 #                    every call, --version included, which is a different refusal.
+#   info_hang_at     N: the Nth `podman info` hangs, counted over EVERY info call in info_hang_calls
+#                    whatever the VM's state, and the others behave as the knobs above say. Hung, it
+#                    writes info_hung.pid and becomes `sleep 3600`, as machine_inspect_hang_at does.
 #   attach_hold      present = the session's `exec ... --attach` blocks until it is removed, so a
 #                    launcher can be held IN its session while a test closes the window on it.
 #   exec_out         what `podman exec ... --attach` prints  []
@@ -282,7 +287,8 @@ EOS
 machine_stop() {
     vp="$(cat "$SHIM/vm.pid" 2>/dev/null)"
     # IDENTIFIED BEFORE KILLED: pids are reused, and tunnel_kill_pid states the same rule.
-    if [ -n "$vp" ] && ps -p "$vp" -o command= 2>/dev/null | grep -qF "$SHIM/vm-fake"; then
+    # -ww: a piped ps is cut at 80 columns by procps, and $SHIM is long.
+    if [ -n "$vp" ] && ps -ww -p "$vp" -o command= 2>/dev/null | grep -qF "$SHIM/vm-fake"; then
         kill "$vp" 2>/dev/null
     fi
     set_mstate stopped
@@ -365,6 +371,12 @@ case "${1:-}" in
         ;;
 
     info)
+        iha="$(get info_hang_at '')"
+        if [ -n "$iha" ]; then
+            ihc=0; [ -f "$SHIM/info_hang_calls" ] && ihc="$(cat "$SHIM/info_hang_calls")"
+            ihc=$((ihc + 1)); echo "$ihc" > "$SHIM/info_hang_calls"
+            [ "$ihc" -eq "$iha" ] && { echo "$$" > "$SHIM/info_hung.pid"; exec sleep 3600; }
+        fi
         [ -f "$SHIM/info_hang" ] && { while :; do sleep 5; done; }
         # WITH A MACHINE, podman's own failure for each state (#495), measured on 6.0.2: stdout
         # still carries the client half of the report, stderr says why. A booting VM is a
@@ -649,7 +661,7 @@ while os.path.exists(d + "/stop_hold"):
                         if [ -n "$ha" ]; then
                             mic=0; [ -f "$SHIM/machine_inspect_calls" ] && mic="$(cat "$SHIM/machine_inspect_calls")"
                             mic=$((mic + 1)); echo "$mic" > "$SHIM/machine_inspect_calls"
-                            [ "$mic" -eq "$ha" ] && { while :; do sleep 5; done; }
+                            [ "$mic" -eq "$ha" ] && { echo "$$" > "$SHIM/machine_inspect_hung.pid"; exec sleep 3600; }
                         fi
                         irc="$(get machine_inspect_rc 0)"
                         [ "$irc" -ne 0 ] && { echo "Error: cannot read machine configuration" >&2; exit "$irc"; }

@@ -299,9 +299,8 @@ assert_says_key "missing:no-container-args-says-so" err.no-args-file "$missing_e
 # TMPDIR=/tmp, where the fixture path is short enough to fit, and red the moment the suite is run
 # with $TMPDIR somewhere longer -- which is exactly what #76 forces a developer to do. An assertion
 # that depends on the length of a temp path is one nobody would think to distrust.
-squash_ws() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | do_tr -d '[:space:]'; }
 assert_contains "missing:the-error-names-the-file" \
-                "$(squash_ws "$FIX/.config/container.args")" "$(squash_ws "$missing_err")"
+                "$(unbox "$FIX/.config/container.args")" "$(unbox "$missing_err")"
 # ON STDERR, WITH STDOUT EMPTY. --dev-args is read by a machine; box art on stdout would arrive
 # as words in the list a caller is parsing.
 assert_eq "missing:nothing-reaches-stdout" "" "$("$FIX/cs193v" --dev-args 2>/dev/null)"
