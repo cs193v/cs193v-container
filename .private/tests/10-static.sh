@@ -2545,9 +2545,11 @@ ln_codex="$(cf_grep "npm install -g [\"']@openai/codex")"
 ln_claude="$(cf_grep "npm install -g [\"']@anthropic-ai/claude-code")"
 # CODEX SITS BEFORE CLAUDE CODE, and which of the two is last is a cache-cost decision rather
 # than a preference. A bump re-runs its own layer plus every layer after it, and these are the two
-# biggest layers in the file -- measured with `podman history`: codex 312 MB, Claude Code 298 MB.
-# With codex earlier, a CLAUDE_CODE_VERSION bump -- the pin most often moved -- re-runs ~323 MB;
-# with codex last, the same bump would drag codex along for ~635 MB.
+# biggest layers in the file -- measured with `podman history`: codex 312 MB, Claude Code 298 MB
+# at codex 0.148 (x86_64); codex 385 MB, Claude Code 286 MB at codex 0.163 and Claude Code 2.1.303
+# (arm64). With codex earlier, a CLAUDE_CODE_VERSION bump re-runs ~310 MB; with codex last, the
+# same bump would drag codex along for ~695 MB. Which order is right depends on which pin moves more; the Containerfile's
+# layer 7 note has the threshold.
 if [ -n "$ln_claude" ] && [ -n "$ln_codex" ] && [ -n "$ln_vercel" ] && [ -n "$ln_gh" ] && [ -n "$ln_node" ] \
    && [ "$ln_claude" -gt "$ln_codex" ] && [ "$ln_codex" -gt "$ln_vercel" ] \
    && [ "$ln_vercel" -gt "$ln_gh" ] && [ "$ln_gh" -gt "$ln_node" ]; then
@@ -5123,7 +5125,7 @@ done
 
 # ONE FILE, TWO TOOLS. The notes are the only real copy: /etc/claude-code/CLAUDE.md is a
 # symlink to them, and the entrypoint links ~/.codex/AGENTS.md at them on every start, because
-# codex reads global instructions only from $CODEX_HOME and that directory is a volume -- a file
+# codex reads a global AGENTS.md only from $CODEX_HOME and that directory is a volume -- a file
 # baked inside it would be seeded once on first mount and never refreshed.
 assert_file "notes:the-one-real-file-exists" "$NOTES"
 assert_ok  "notes:containerfile-links-the-claude-managed-slot" \

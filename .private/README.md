@@ -1316,6 +1316,12 @@ podman volume rm cs193v-$CS193V_INSTANCE-playwright
 Nothing is lost — the image re-seeds it on the next create. A student never hits this,
 because their first container is also their first volume.
 
+The `cs193v-codex` volume has the opposite problem: it holds Codex's background server, which
+follows OpenAI's latest release on its own and survives `--rebuild` (see "Codex's background
+server" below). To test a Codex bump against the pinned build rather than whatever that server
+updated itself to, clear it first — `rm -rf ~/.codex/packages` inside the container, or drop the
+volume, which also logs Codex out.
+
 The test suite honours `CS193V_INSTANCE` too, so `run-tests.sh` exercises your instance
 rather than a colleague's. With the variable unset, every name is byte-identical to what it
 was before — a student never sets it.
@@ -2513,35 +2519,93 @@ Three things learned against the real binary, all of which shape what the suite 
 promise:
 
 - **`/etc/codex/managed_config.toml` really is read.** Proved by control rather than assumed: an
-  override saying `approval_policy = "untrusted"` makes `codex doctor` report `UnlessTrusted`
-  instead of `OnRequest`. `50-image.sh` runs exactly that probe, because the two values the course
-  ships are also codex's defaults — so without the control, those assertions would pass against an
-  image carrying no policy at all.
-- **codex ignores an unrecognised key in silence.** A bogus key leaves `codex doctor` reporting
-  "config loaded" with no warning, so a typo or an upstream rename is a policy that does nothing
-  and says nothing. That is why `10-static.sh` pins the exact key SET and the values, not a subset.
-- **Nothing can assert `approvals_reviewer`.** `codex doctor`, even with `--all`, never names the
-  reviewer, so no test can tell `user` from `auto_review`. Only a live escalation shows who
-  answers, and `MANUAL.md` carries that check. Combined with the silent-ignore behaviour above,
-  this is the one setting in the course that could quietly stop applying.
+  override saying `approval_policy = "never"` makes `codex doctor` report `Never` instead of
+  `OnRequest`. `50-image.sh` runs exactly that probe, because the two values the course ships are
+  also codex's defaults — so without the control, those assertions would pass against an image
+  carrying no policy at all. The probe used `untrusted` -> `UnlessTrusted` until codex 0.149
+  retired the value; at 0.163 it makes doctor report "config could not be loaded". `read-only`,
+  #529's suggestion, would not do: doctor says `restricted` for both sandbox modes.
+- **An unrecognised key does nothing.** At 0.148 codex skipped it in silence, leaving `codex
+  doctor` at "config loaded" with no warning. Since 0.155 doctor names it ("Codex is ignoring 1
+  unrecognized configuration setting … `key` is ignored"), so `50-image.sh` asserts the shipped
+  file produces no such line, with a bogus-key control proving the line exists. It still pins the
+  exact key SET and the values, not a subset.
+- **Nothing can assert `approvals_reviewer` being honoured.** `codex doctor`, even with `--all`,
+  never names the reviewer (re-checked at 0.163), so no test can tell `user` from `auto_review`.
+  Only a live escalation shows who answers, and `MANUAL.md` carries that check. The ignored-key
+  check above now catches the key being renamed upstream; nothing catches it being honoured
+  differently.
 
 What is still NOT shipped, and why:
 
-- **No `requirements.toml`.** These are managed DEFAULTS, so a student who edits
-  `~/.codex/config.toml` can still move them — and that file lives in the `cs193v-codex` volume,
-  which `--rebuild` does **not** clear (only `--rebuild --logout` does). Making the posture
-  unmovable is a separate decision. The precedence between a managed default and a student's own
-  config is stated nowhere in the reference; the enterprise page's ordering implies managed wins,
-  which if true would make the current file a pin rather than a default. Settle it the way the
-  read-check above was settled — a conflicting value and `codex doctor` — before relying on either
-  reading.
+- **No `requirements.toml`, because the file is already enforced (#529, settled).** This used to
+  say the three keys were managed DEFAULTS a student could move from `~/.codex/config.toml`, and
+  asked for the precedence to be measured. It was measured, and the file is a pin: codex ranks
+  `managed_config.toml` above the student's own config and above `-c` flags, and re-reads each of
+  its keys as a requirement (`config/src/loader/mod.rs`, the same at 0.148 and 0.163). The one give
+  is `approvals_reviewer`, where `auto_review` also allows `user`. `50-image.sh`'s
+  `codex:student-config-cannot-loosen-the-policy` holds it: a student config saying `never` and
+  `danger-full-access` leaves doctor at `OnRequest` and `restricted`. What the file does NOT stop
+  is a student loosening a key it does not name — #550 is one. So any key added to it is a pin;
+  a default a student can change goes in `/etc/codex/config.toml`, codex's lowest layer, and
+  nothing is shipped there.
 - **Nested bubblewrap is still not proven to work here.** Anthropic documents the same tool failing
   in an unprivileged container ("bubblewrap cannot mount a fresh `/proc`"), and the container flags
   that would fix it are on the invariants list. `codex doctor` reports `filesystem sandbox
   restricted` in this image, but it reports that for `read-only` too, so the label does not
   distinguish a working `workspace-write` boundary from a coarser one. What a student would notice
   is whether an escalation happens at all — which is now the reviewer subagent's business, not
-  theirs.
+  theirs. On macOS hosts it is settled the bad way: bwrap is refused the mounts it needs (#527).
+
+### ~~Codex's background server~~ — decided (issue #571)
+
+**Left on, as any npm user gets it, and it follows OpenAI's latest release.** Since 0.157 the first
+interactive `codex` starts a background app-server that every later one attaches to. Staff chose to
+keep it with its updater, on the same reasoning as Claude Code's auto-update in
+`managed-settings.json`: students running the newest Codex is not a harm. What that costs, measured
+at 0.163 on arm64 unless it says otherwise:
+
+- **The agent runs from a copy in the volume.** The first launch copies the whole package into
+  `~/.codex/packages/app-server-daemon` (368 MB; the x86_64 package is 430 MB) and runs
+  `…/releases/0.163.0-aarch64-unknown-linux-musl/bin/codex app-server --listen unix://
+  --analytics-default-enabled --managed-daemon`. The TUI is a client of it. `codex exec` and
+  `codex doctor` never use it.
+- **That copy updates itself.** It is written with an `auto-update-version` marker, so its updater
+  runs `https://chatgpt.com/codex/install.sh` with `CODEX_RELEASE=latest` five minutes after it
+  starts and hourly after that (`app-server-daemon/src/update_loop.rs`). The pin therefore governs
+  the CLI and the TUI, not the code that runs a student's commands.
+- **`--rebuild` does not reset it.** It is in the `cs193v-codex` volume, so it is the one exception
+  to "`--rebuild` restores exactly the image" — CONTAINER-DESIGN.md says so — and the second to the
+  no-package-caches rule in `container.args`. `--rebuild --logout` clears it with the logins.
+  Claude Code's updates, by contrast, land in the writable layer, which every `--rebuild` discards.
+- **Every tab shares it, and its environment** is the environment of the tab that started it.
+- **Closing the window kills it.** `podman stop` makes the keep-alive PID 1 exit, so a turn in
+  flight is lost rather than drained. The pidfile left in the volume is checked by identity, not
+  PID, on the next start (`pid_identity.rs`).
+- **Analytics default to on** for daemon-launched servers (#49426). A student's own
+  `analytics.enabled = false` turns them off.
+- **No TCP port.** The server listens on a Unix socket, and with the TUI up nothing is forwarded.
+  Voice (F8) opens ephemeral TCP listeners per upstream source; not measured here.
+- **Disk, and it grows.** Each release the updater installs is unpacked beside the last and never
+  removed — neither the daemon nor the `install.sh` it runs prunes. Measured: a server seeded at
+  0.162.1 updated itself to 0.163.0 after 317 s and kept both, 390 + 368 MB = 757 MB. Upstream
+  shipped 30 stable releases in the 58 days between 0.148 and 0.163, so a student who uses Codex
+  all quarter can accumulate gigabytes in the podman VM. Known upstream and unanswered: openai/codex#52067 (a
+  releases folder at 2.8 GB), and #48195 asks for the whole feature to be opt-in. **Accepted and
+  documented rather than pruned** (staff decision, #571); nixpkgs went the other way and disables
+  it by default (NixOS/nixpkgs#567051). The way out is `--rebuild --logout`, or deleting every
+  directory under `~/.codex/packages/app-server-daemon/releases/` except the one `current`
+  points to, with Codex closed.
+- **If it cannot start**, `codex` exits and says to rerun with `--no-daemon`, which is also the
+  way round it for one invocation.
+- **Upgrade and rollback across the volume**, measured with an unusable API key rather than a
+  login, so treat it as a smoke test: 0.163 opens a volume 0.148 wrote with no doctor errors (it
+  adds `[tui] screen_reader_detection_done = true` to the student's `config.toml`), and 0.148
+  opens one 0.163 wrote but showed its sign-in screen where it had accepted the same key before.
+  Re-check with a real login before relying on a rollback.
+
+None of this is assertable in `50-image.sh`, whose containers have no volume. `MANUAL.md` carries
+the checks.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 

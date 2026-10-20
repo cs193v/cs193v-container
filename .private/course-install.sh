@@ -152,10 +152,10 @@ WSL_DISTRO="CS193V"
 # about QEMU. BOTH MEASURED ON APPLE SILICON'S libkrun; an Intel Mac runs 5.8 on applehv (vfkit),
 # where neither has been measured yet -- tests/MANUAL.md §5.3 asks (#350).
 #
-# It is that this workload does not benefit from more. The image is 2.48 GB and a cold build
-# is 242 s; nothing here scales with a bigger VM, so the ceiling costs a student nothing they
-# would have used, and a smaller ceiling leaves more of a laptop for the laptop. Raising it
-# for a machine that really needs more is one `machine set --memory` away.
+# It is that this workload does not benefit from more. The image is 2.48 GB (2.66 GB at codex
+# 0.163, arm64) and a cold build is 242 s; nothing here scales with a bigger VM, so the ceiling
+# costs a student nothing they would have used, and a smaller ceiling leaves more of a laptop for
+# the laptop. Raising it for a machine that really needs more is one `machine set --memory` away.
 #
 # The floor is ours: 4 GB is the smallest VM this build has been seen to work in (ERRORS.md's
 # rig had 3.4 GB).
@@ -1422,6 +1422,14 @@ build_image() {
 # arithmetic dressed as measurement. The 8 GB floor below was chosen with roughly 3.7 GB of
 # headroom over the 4.3 GB it cites, so ~312 MB more image does not exhaust it — but a genuine
 # re-measurement needs a clean machine and is worth doing before the quarter.
+#
+# CODEX 0.163 ADDED MORE, in two places, measured on arm64. The image: 2,664,077,394 bytes with
+# Claude Code 2.1.225, 114 MB over the same recipe at codex 0.148 on the same machine
+# (2,550,167,091); 2,655,019,657 with Claude Code 2.1.303 (#569). And, once a student runs
+# codex, its background server's copy of itself in the cs193v-codex volume: 368 MB at first, plus
+# about as much again for every release it updates itself to, never pruned (757 MB after one).
+# That second figure is not a build cost and does not move this floor, but it is disk the VM has
+# to hold all quarter; the staff README's "Codex's background server" has it.
 #
 # TWO costs, and the second is the one that surprises. The build peaks above its own result
 # because at each step's commit the same bytes exist in the layers already written, in the

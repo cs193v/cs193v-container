@@ -76,7 +76,7 @@ if [ -d "$store" ]; then
 fi
 
 # The course notes, for Codex. Same class of problem as the line above and a different shape of
-# fix: codex reads global instructions ONLY from $CODEX_HOME/AGENTS.md, and ~/.codex is a named
+# fix: codex reads a global AGENTS.md ONLY from $CODEX_HOME/AGENTS.md, and ~/.codex is a named
 # volume — so a copy baked into the image there would be seeded on first mount and never
 # refreshed again, which is the whole reason the notes live in /etc. Linking them on every start
 # means an image update reaches a student who logged in weeks ago.

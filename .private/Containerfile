@@ -505,37 +505,55 @@ RUN set -eux; \
 #
 # BEFORE Claude Code, not after, and that ordering is a cache-cost decision rather than a
 # preference. A bump re-runs its own layer plus every layer below it, and these are the two
-# biggest layers in the file -- MEASURED with `podman history`, not estimated: codex 312 MB,
-# Claude Code 298 MB, and ~25 MB of config and tldr-cache layers after them.
+# biggest layers in the file -- MEASURED with `podman history`, not estimated. At codex 0.148 on
+# x86_64: codex 312 MB, Claude Code 298 MB, and ~25 MB of config and tldr-cache layers after them.
+# At codex 0.163 on arm64: codex 385 MB (271 MB at 0.148 on the same machine), Claude Code 286 MB
+# (2.1.303).
 #
-# So the question is only which tool's bump is the cheap one. Claude Code's pin is the one most
-# often moved, and with codex ABOVE it that bump re-runs ~323 MB; with codex below, the same bump
-# would drag codex's 312 MB along for ~635 MB. The codex bump pays that price instead, which is
-# the right way round while Claude Code is the pin that moves. 10-static.sh asserts the order.
+# So the question is only which tool's bump is the cheap one. With codex ABOVE Claude Code, a
+# Claude Code bump re-runs ~310 MB and a codex bump ~695 MB (arm64, codex 0.163, Claude Code
+# 2.1.303); the other way round they would cost ~695 MB and ~410 MB. This order wins as long as
+# Claude Code is bumped at least ~0.74x as often as codex -- the ratio of their layers, 286/385; it
+# was 298/312, ~0.96x, at codex 0.148. The premise it was chosen on, "Claude Code is the pin that
+# moves", has no history behind it yet: both pins first moved in the same week (#569, #571).
+# 10-static.sh asserts the order.
 #
 # (Do not compare those layer sizes against the "89 s and 95 MB" for a CLAUDE_CODE_VERSION bump
 # at the top of this file: that figure is the DELTA podman reports for the bump, not the size of
-# the layer it rebuilds. Cold build of this recipe, measured on the development machine: 242 s.)
+# the layer it rebuilds. Cold build of this recipe, measured on the development machine at codex
+# 0.148: 242 s, not re-measured since. The 0.148 -> 0.163 bump itself re-ran steps 15-26 in 151 s
+# on an arm64 development machine.)
 #
-# THE npm PACKAGE IS A WRAPPER. `@openai/codex` is three files and 11 KB: a node script that
-# spawns a native binary out of a platform optionalDependency (`@openai/codex-linux-x64` or
-# `-linux-arm64`, aliased to this exact version, so pinning the wrapper pins the binary too).
-# Two consequences elsewhere in this repo: /proc reports the INTERPRETER for a `#!/usr/bin/env
-# node` script, which is why files/tmux/tabname.bash lists `codex` (Claude Code's npm bin is a
-# native ELF and needs no such help, though the list keeps `claude` against a repackaging, #416);
-# and the vendored tree carries its own `rg` and `zsh` off the student's PATH, so the
-# "ripgrep is deliberately absent" decision in the staff README is untouched.
+# THE npm PACKAGE IS A WRAPPER. `@openai/codex` is three files and 11 KB (13 KB at 0.163): a node
+# script that spawns a native binary out of a platform optionalDependency
+# (`@openai/codex-linux-x64` or `-linux-arm64`, aliased to this exact version, so pinning the
+# wrapper pins the binary too). Two consequences elsewhere in this repo: /proc reports the
+# INTERPRETER for a `#!/usr/bin/env node` script, which is why files/tmux/tabname.bash lists
+# `codex` (Claude Code's npm bin is a native ELF and needs no such help, though the list keeps
+# `claude` against a repackaging, #416); and the vendored tree carries its own `rg` off the
+# student's PATH, so the "ripgrep is deliberately absent" decision in the staff README is
+# untouched. (It carried a `zsh` too, until 0.163 stopped bundling one.)
 #
 # INSTALLED AS THE STUDENT for the reason in layer 2, and codex makes the same demand Claude
 # Code does: the wrapper detects npm (it sets CODEX_MANAGED_BY_NPM=1) and its update advice is
-# `npm install -g @openai/codex@latest`, which writes whatever the STUDENT's prefix points at.
+# `npm install -g @openai/codex`, which writes whatever the STUDENT's prefix points at.
 # Installed as root it would land in nodesource's /usr prefix, invisible to `npm ls -g`, and an
-# update would put a SECOND 309 MB copy in ~/.local that shadows this one on PATH. Issue #13.
+# update would put a SECOND copy in ~/.local that shadows this one on PATH -- the x86_64 package
+# is 309 MB at 0.148 and 430 MB at 0.163, per the npm registry. Issue #13.
+#
+# THE PIN COVERS THE CLI, NOT CODEX'S BACKGROUND SERVER. Since 0.157 the first interactive `codex`
+# copies this package into ~/.codex/packages/app-server-daemon -- the cs193v-codex volume, which
+# --rebuild keeps -- and that copy follows OpenAI's latest release on its own, hourly. Accepted on
+# purpose; the staff README's "Codex's background server" section has what it costs and why.
 #
 # THE VERSION CHECK RUNS AS THE STUDENT, unlike the vercel and claude checks in layers 6 and 8,
 # which run as root by absolute path. Two reasons: it is what proves the binary is
 # reachable and executable from the account that will actually run it (issue #71 asks for
-# exactly that), and running it as root would leave a stray /root/.codex in the image.
+# exactly that), and running it as root would leave a stray /root/.codex in the image. Running
+# it as the student leaves a stray ~/.codex/tmp/ instead -- symlinks into this image's own copy
+# of the binary, seeded into every student's volume on first mount -- which is why the RUN then
+# deletes ~/.codex outright. Layer 9 creates it again, empty, with the mode the volume needs.
+# 50-image.sh's img:codex-home-is-empty holds that line.
 #
 # THE ELF CHECK is layer 5's, for layer 5's reason. npm picks the platform package from `os`
 # and `cpu` fields, and if that selection is ever wrong the symptom is a wrong-architecture
@@ -546,13 +564,14 @@ RUN set -eux; \
 # layer until #349 and #358 gave 6b a reason to exist.
 #
 # What it buys is exact, and it is not a sandbox. codex ships its own vendored bwrap but prefers
-# a system one, warning at every start when there is none: "Codex could not find system
-# bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager." In THIS
-# container that warning is worse than noise, because a student can run the `sudo apt install`
-# it suggests and the next --rebuild silently undoes it. The package also takes codex's
-# documented "improved sandbox startup on Ubuntu/AppArmor hosts" path, which matters because
-# no sandbox policy is shipped (see below) and codex therefore runs on its `workspace-write`
-# default and really does invoke bwrap.
+# one on PATH, warning when there is none: "Codex could not find bubblewrap on PATH. Install
+# bubblewrap with your OS package manager." (`sandboxing/src/bwrap.rs`, the same text at 0.148 and
+# 0.163; until #571 this comment quoted a wording neither build contains). In THIS container that
+# warning is worse than noise, because a student can run the `sudo apt install` it suggests and the
+# next --rebuild silently undoes it. The package also takes codex's documented "improved sandbox
+# startup on Ubuntu/AppArmor hosts" path, which matters because codex runs `workspace-write` and
+# really does invoke bwrap -- though on macOS hosts bwrap is refused the mounts it needs (#527).
+# Since 0.162 codex rejects a bwrap on PATH that the user can modify; this one is root's.
 #
 # THE SANDBOX POLICY IS SHIPPED, in /etc/codex/managed_config.toml, installed by layer 9 -- the
 # analogue of /etc/claude-code/managed-settings.json, and in /etc for the same two reasons:
@@ -562,28 +581,41 @@ RUN set -eux; \
 # drift under us) and `approvals_reviewer = "auto_review"`, which is a decision rather than a
 # default; the staff README records it (#71, #526).
 #
-# TWO THINGS THAT BITE, both verified against the real binary rather than reasoned about:
+# IT IS ENFORCED, NOT A SET OF DEFAULTS (#529). codex ranks managed_config.toml above the
+# student's own ~/.codex/config.toml and above `-c` flags, and re-reads each key as a requirement
+# (`config/src/loader/mod.rs`, the same at 0.148 and 0.163). The one give is approvals_reviewer,
+# where `auto_review` also allows `user`. This comment called them defaults until #529 measured
+# otherwise. A default the student CAN override belongs in /etc/codex/config.toml, the lowest
+# layer; nothing is shipped there.
 #
-#   * codex IGNORES A KEY IT DOES NOT RECOGNISE, in silence. A bogus key leaves `codex doctor`
-#     reporting "config loaded" with no warning, so a typo or an upstream rename is a policy that
-#     does nothing and says nothing. Layer 9 parses the TOML, 10-static.sh pins the exact key set
-#     and values, and 50-image.sh proves codex really reads /etc/codex by overriding it with a
-#     DIFFERENT value and watching doctor's output change. That last one is the only assertion of
-#     the three that could not pass against an image carrying no policy at all.
+# THREE THINGS THAT BITE, all verified against the real binary rather than reasoned about:
+#
+#   * A KEY CODEX DOES NOT RECOGNISE DOES NOTHING. At 0.148 it was skipped in silence; since 0.155
+#     doctor names it ("Codex is ignoring 1 unrecognized configuration setting"). Layer 9 parses
+#     the TOML; 50-image.sh pins the exact key set and values, asserts doctor names nothing in the
+#     shipped file (with a bogus-key control), and proves codex really reads /etc/codex by
+#     overriding it with a DIFFERENT value and watching doctor's output change.
 #   * NOTHING CAN ASSERT approvals_reviewer. `codex doctor`, even with --all, never names the
-#     reviewer, so no test here can tell `user` from `auto_review`; only a live escalation shows
-#     who answers. MANUAL.md carries that check.
+#     reviewer (re-checked at 0.163), so no test here can tell `user` from `auto_review`; only a
+#     live escalation shows who answers. MANUAL.md carries that check.
+#   * VALUES RETIRE. 0.149 removed `approval_policy = "untrusted"`, which the read-check above
+#     used as its control; setting it now makes doctor report "config could not be loaded".
 #
-# These are managed DEFAULTS, not hard constraints: no requirements.toml is shipped, and a
-# student's own ~/.codex/config.toml lives in a volume that --rebuild does NOT clear (only
-# --rebuild --logout does), so anything they set there survives a rebuild.
+# BUMPING THIS means more than the number. Rebuild and run `run-tests.sh --tier image -k
+# 50-image`: the codex:* doctor checks are the ones that watch upstream behaviour, and a retired
+# value or renamed key reddens them. Then the MANUAL.md checks nothing can automate -- the
+# reviewer escalation, the AGENTS.md questions, `codex login`, the wheel and copy rows of §7.11 --
+# through the interactive TUI, because `codex exec` never touches the background server students
+# use. Re-take the layer sizes above. A student with a seeded volume keeps whatever background
+# server it already holds; that is the accepted cost described above.
 # ─────────────────────────────────────────────────────────────────────────────
 ####> Installing Codex...
-ARG CODEX_VERSION=0.148.0
+ARG CODEX_VERSION=0.163.0
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g '@openai/codex@${CODEX_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
     su student -s /bin/sh -c '/home/student/.local/bin/codex --version' | grep -qF "${CODEX_VERSION}"; \
+    rm -rf /home/student/.codex; \
     CODEX_BIN="$(find /home/student/.local/lib/node_modules/@openai -type f -name codex -perm -u+x | head -1)"; \
     test -n "$CODEX_BIN"; \
     case "$(uname -m)" in \
@@ -710,7 +742,7 @@ COPY files/ /tmp/cs193v-files/
 #
 #     THE NOTES THEMSELVES ARE ONE FILE FOR TWO AGENTS, and they are not here: they live at
 #     /etc/cs193v/agent-notes.md with item 9's other shared files, and /etc/claude-code/CLAUDE.md
-#     is a SYMLINK to them. Codex reads global instructions only from $CODEX_HOME, which is a
+#     is a SYMLINK to them. Codex reads a global AGENTS.md only from $CODEX_HOME, which is a
 #     volume, so files/entrypoint.sh links ~/.codex/AGENTS.md at the same file on every start —
 #     the "seeded once, never refreshed" trap this item exists to avoid, met a second time.
 #

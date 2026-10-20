@@ -276,6 +276,14 @@ always there — that column is about an *extra* one you downloaded by asking fo
 Playwright version. `--rebuild --logout` drops it, and the image's own Chromium comes straight
 back, so the worst case is one more download and never a broken setup.
 
+**One thing installed in the container that `--rebuild` keeps: Codex's background server.** The
+first time you run `codex`, it copies itself into `~/.codex`, next to your Codex login, and from
+then on that copy keeps itself up to date with OpenAI's newest release. Because it lives with your
+login, `--rebuild` leaves it alone and `--rebuild --logout` clears it. It also keeps every version
+it updates from, at roughly 400 MB each, so over a quarter it can take several gigabytes; if the
+container ever runs short of disk, `--rebuild --logout` is the fix (you will need to log in to your
+tools again afterwards).
+
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
 strangely, and staff will suggest it freely.
 
@@ -339,8 +347,14 @@ Codex is set up differently, and you should know which is which. It runs with a 
 it may read widely, write inside the project you are working in, and anything beyond that counts as
 stepping outside. When it wants to step outside, **a reviewer decides rather than you** — course
 staff configured it that way in `/etc/codex/managed_config.toml`, which is part of the image, so a
-`--rebuild` restores it. Settings you put in `~/.codex/config.toml` yourself are your own and
-survive a rebuild; only `--rebuild --logout` clears them.
+`--rebuild` restores it. Those settings win over your own: `~/.codex/config.toml` cannot loosen
+them. Anything else you put there is your own and survives a rebuild; only `--rebuild --logout`
+clears it.
+
+Every Codex tab shares one background server, which is why the first `codex` you run takes a
+little longer than the rest. It keeps the environment of the tab you started it from — so if you
+change something in another tab, such as activating a Python virtual environment, and Codex does
+not see it, restart the server from `/daemon` inside Codex, or run `codex --no-daemon` to skip it.
 
 Neither arrangement is a security boundary on its own. The container is.
 
@@ -362,7 +376,9 @@ That is not exotic. It is the central hazard of the whole practice this course t
 
 Which is why `--rebuild` matters: it restores the container to exactly the image the
 course container was built from. If anything ever feels off, rebuild rather than
-investigate.
+investigate. (The one thing it leaves alone is Codex's background server, which lives with your
+Codex login — see "What survives what". If Codex itself is what feels off, `--rebuild --logout`
+resets that too, and logs you out.)
 
 That property survives the fact that the image is built on your own computer rather than
 downloaded. What tampering changes is the container's writable layer, not the image
@@ -443,12 +459,13 @@ that *sound* protective actually are.
   Your scrollback is 50,000 lines per tab and belongs to the container, not to your terminal
   — so it survives switching tabs and coming back.
 
-  **Claude Code is the one exception, and it is deliberate.** It draws its own full-screen
-  view and scrolls itself, so the wheel moves Claude Code's conversation rather than the
-  50,000 lines behind it, and what it has printed is not in that scrollback. Codex is not
-  like this: it prints into the scrollback the same way `python3` or `git log` does, so the
-  wheel scrolls the tab. The two agents behaving differently is a property of the agents
-  rather than a choice made here — see issue #77.
+  **Claude Code and Codex are the exceptions.** Each draws its own full-screen view and
+  scrolls itself, so the wheel moves the agent's conversation rather than the 50,000 lines
+  behind it, and what it has printed is not in that scrollback. For Claude Code that is a
+  choice made here — see issue #77. For Codex it is Codex's own default since version 0.157,
+  and yours to change: Codex's `/tui` command switches it to scrollback mode from the next time
+  you start Codex, after which it prints into the tab the way `python3` or `git log` does and
+  the wheel scrolls the tab instead.
 
   **To copy text, hold a key while you drag** — and which key depends on your terminal.
   Dragging without it does nothing on purpose: the container cannot reach your computer's
