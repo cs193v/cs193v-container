@@ -5632,7 +5632,7 @@ fi
 # the helper. Carved from setup_machine, comments stripped, because the init's flags span lines.
 if carve_func "$PRIVATE/course-install.sh" setup_machine "$ms_tmp/setup_machine.sh"; then
     assert_not_contains "machine:the-installer-does-not-init-with-now" '--now' \
-                        "$(grep -v '^[[:space:]]*#' "$ms_tmp/setup_machine.sh")"
+                        "$(run_grep -v '^[[:space:]]*#' "$ms_tmp/setup_machine.sh")"
 else
     fail "machine:the-installer-does-not-init-with-now" "setup_machine not found in course-install.sh"
 fi

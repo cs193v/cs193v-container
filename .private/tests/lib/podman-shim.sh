@@ -535,7 +535,9 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
 # DIGITS OR NOTHING, as pty_inner_pid has it: an unreadable pid must read as no pid, never as a
 # value a comparison could pass on.
 vm_pid()   { local p=''; read -r p 2>/dev/null < "$SHIM/vm.pid"; case "$p" in ''|*[!0-9]*) ;; *) printf '%s' "$p" ;; esac; }
-vm_snap()  { cat "$SHIM/vm.snapshot" 2>/dev/null; }
+# THROUGH run_checker (#559): every reader of it asserts an absence somewhere -- no fds, no HUP
+# ignored -- and a snapshot that could not be read must not read as one that says nothing.
+vm_snap()  { run_checker cat "$SHIM/vm.snapshot" 2>/dev/null; }
 vm_alive() { local p; p="$(vm_pid)"; [ -n "$p" ] && ! pid_is_gone "$p"; }
 sid_of()   { case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
              "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
