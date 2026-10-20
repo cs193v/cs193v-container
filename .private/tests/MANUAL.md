@@ -377,8 +377,12 @@ tests the font files rather than their discoverability.
 see the known limitation below.
 
 **TRY CODEX'S BROWSER FLOW BEFORE REACHING FOR `--device-auth`.** Its callback wants
-`localhost:1455`, and any port a program binds inside the container is forwarded within about a
-second of the bind, so nothing has to be arranged for it. If the redirect flow works, say so —
+`127.0.0.1:1455` (`localhost:1455` before 0.158; 1457 if 1455 is taken), and any port a program
+binds inside the container is forwarded within about a second of the bind, so nothing has to be
+arranged for it. Try it twice: `codex login` from a shell, and the login screen of the interactive
+TUI, which since 0.157 runs inside Codex's background server — so do the TUI one from a SECOND tab
+after closing the tab that first started `codex`, because `open-url` aims its popup at the pane of
+whichever tab started that server. If the redirect flow works, say so —
 the same question is open for the other three, and issue #82 is where it gets measured.
 
 **FIXED, AND WORTH LOOKING AT ON PURPOSE — `claude` `/login` now shows the link in a popup.**
@@ -490,10 +494,15 @@ Inside the container, logged in to codex, ask for something that needs to leave 
 codex exec 'run: sudo apt-get install -y sl'
 codex exec 'append a line to /home/student/.bashrc'
 ```
+**Then ask the same two things in the interactive TUI** (`codex`, then type them). Since 0.157 the
+TUI hands its work to Codex's background server, which runs from a copy in `~/.codex` that follows
+OpenAI's latest release; `codex exec` runs in-process from the pinned CLI and never touches it. So
+`exec` alone checks a Codex no student is using.
 *Expect:* the escalation is decided **without the student being asked** — the reviewer subagent
-answers it. If a prompt reaches the student instead, the setting is not in effect: codex ignores an
-unrecognised key in silence (verified), so an upstream rename would look exactly like this and
-nothing else would fail.
+answers it. If a prompt reaches the student instead, the setting is not in effect. An upstream
+RENAME of the key would show in `codex doctor` as "Codex is ignoring 1 unrecognized configuration
+setting" (since 0.155; `50-image.sh` asserts it does not), so a prompt with no such line means the
+key is read and honoured differently — worth an issue either way.
 *Also record* whether the sandbox stopped the command at all. `codex doctor` says `filesystem
 sandbox restricted`, but it says that for `read-only` too, and Anthropic documents bubblewrap being
 unable to mount a fresh `/proc` in an unprivileged container — so a write that simply succeeds
@@ -502,6 +511,40 @@ out of.
 *Automated:* that the file is present, parses, is student-readable and not student-writable, and
 that codex really reads `/etc/codex` at all — the last one by overriding the policy with a
 different value and watching `codex doctor` change (`50-image.sh`).
+
+### Codex's background server — what a student's session actually runs
+Since 0.157 the first interactive `codex` copies the package into
+`~/.codex/packages/app-server-daemon` and runs the agent from there; that copy follows OpenAI's
+latest release by itself and survives `--rebuild` (accepted on purpose — staff README, "Codex's
+background server"). `50-image.sh` cannot see any of it: its containers have no volume. In a live
+container, after a `codex` bump:
+- **First launch.** Run `codex` in a fresh volume. *Expect:* no install message; a short delay;
+  `~/.codex/packages/app-server-daemon/current` appears, owned by `student`, with an
+  `auto-update-version` marker beside it, and `pgrep -af app-server` shows the agent running from
+  `~/.codex/packages/…`, not from `~/.local`. Measured at 0.163 on arm64: 368 MB, and the composer
+  up within a second while the copy finished behind it.
+- **Close the window and come back.** `podman stop` kills the server with everything else. *Expect:*
+  `codex` starts normally on the next launch; the pidfile left in the volume is checked by identity,
+  not PID. Then close the window DURING a first launch, before `current` appears, and relaunch.
+- **Shared environment.** Start `codex` in one tab; in a second tab activate a virtualenv and ask
+  Codex to run `which python`. *Expect:* the first tab's answer — that is upstream's design
+  ("per-client environment isolation is not provided"), and CONTAINER-DESIGN.md tells students to
+  restart the server from `/daemon` or use `codex --no-daemon`. Confirm both work.
+- **Ports.** With the TUI up, the server running, F8 tried and an MCP login tried: `ss -Hltnp`
+  inside, `cs193v-portwatch --show`, and `cs193v doctor` on the host. *Expect:* nothing forwarded
+  beyond `1455`/`1457` during a login. Measured at 0.163 without voice or MCP: no TCP listener at
+  all. Upstream source says voice opens ephemeral listeners on `0.0.0.0`/`[::]`; anything that gets
+  forwarded is a finding.
+- **It updates itself, and keeps the old release.** With the network up, leave a server seeded
+  from an older release running for five minutes and list
+  `~/.codex/packages/app-server-daemon/releases/`. Measured at #571: seeded at 0.162.1, it moved
+  `current` to 0.163.0 after 317 s and kept both (757 MB). That growth is accepted and documented
+  (staff README); if a release ever starts pruning, say so and drop the caveat from
+  CONTAINER-DESIGN.md.
+- **The upgrade a student takes.** Seed a volume at the old pin (logged in, one conversation), then
+  `--rebuild` to the new one WITHOUT `--logout`. *Expect:* `codex resume` lists the old
+  conversation and nothing reports a migration error. Then the rollback story: does the old image
+  still start against a volume the new one has touched? Record it either way.
 
 ### §8.7 — who approves what the agent does (#526)
 Claude Code's starting mode is left at its own default, which is auto mode from 2.1.283: a
@@ -589,7 +632,8 @@ Ask about the property the notes actually state, not about a list.
 *Also:* the same answer proves the SYMLINK works — `/etc/claude-code/CLAUDE.md` is a link to
 `/etc/cs193v/agent-notes.md`, and nothing in the suite can prove Claude Code follows it in the
 managed slot. Ask codex the same question (`codex exec "May a dev server use any port here, or
-only certain ones?"`) to cover the other end of the same file.
+only certain ones?"`, and again in the interactive TUI, for the reason in the reviewer section
+above) to cover the other end of the same file.
 
 *And the host-path half of the notes (#257), on both agents.* Claude's runs in auto mode, the
 student's default, because the question is whether the agent RUNS `cs193v-platform-messages`, and
@@ -1776,13 +1820,23 @@ claims a copy that did not happen, which is #66 arriving through the application
 the string. Before #307 this path was unreachable, because a drag inside Claude Code was
 discarded entirely — so confirm it per terminal and treat Terminal.app's answer as known.
 
-Then the same wheel test with `codex`, where the expectation is the **opposite** and that is not a
-bug: tmux scrolls, the banner does appear, and codex uses part of the pane. Its TUI is inline by
-design at 0.148 — measured, `tui.alternate_screen` governs only the transcript overlay — so its
-output really is in the 50,000-line scrollback and copy mode is the right way to read it.
+Then the same wheel test with `codex`. **Since 0.157 the expectation is the same as Claude
+Code's**: Codex's default TUI is fullscreen, so the wheel scrolls Codex's own transcript, no
+SCROLLED BACK banner appears, and Codex uses the whole pane. Until 0.148 it was the opposite —
+inline, tmux scrolled — and this section said so. Also try, and record per terminal:
+- dragging inside Codex, and Codex's own copy (`/copy`). From source, Codex copies the way Claude
+  Code does — `tmux load-buffer -w`, forwarded as OSC 52 — so expect the same per-terminal answer
+  as the `ctrl+c` row above, Terminal.app included (#318);
+- `FN`/`SHIFT`+drag, which selects only what is on screen, since the alternate screen has no
+  scrollback behind it;
+- `/tui` → Scrollback, then restart `codex`: it should print into the tab again, and the wheel
+  should scroll tmux with the banner, as at 0.148;
+- F8 (voice) with no audio device in the container: record what Codex says.
 
 **Known, filed separately as #83:** `CTRL+T` is bound to "new tab", so Codex's own *"ctrl + t to
-view transcript"* never reaches it. Do not report that as a failure of this section.
+view transcript"* never reaches it (still bound to CTRL+T at 0.163). Do not report that as a
+failure of this section. It costs less than it did: the fullscreen view scrolls the transcript
+itself.
 
 *Baseline, re-measured for #307 rather than inherited — macOS 15, Terminal.app, rootless podman,
 image 2.1.225:* the three click rows and the hover row **pass**; the plain-drag row passes, with
@@ -1798,8 +1852,11 @@ now the entire job of `copyOnSelect: false`.
 reaches. `alt=1 mouse=1` off the shipped image proves tmux *forwards* the event and stops there;
 "…and Claude Code then scrolls its own transcript" has no automated equivalent, so it has to be
 re-checked by a person after a Claude Code update — and Claude Code auto-updates in this image.
-Codex's opposite behaviour, described just above, is measured rather than merely expected: on a
-live logged-in session its pane reports `alt=0 mouse=0` and it draws 14 rows of 34.
+The same goes for Codex after a codex bump, and its background server updates itself too. Codex's
+readings are measured rather than expected: at 0.148, on a live logged-in session, its pane
+reported `alt=0 mouse=0` and it drew 14 rows of 34; at 0.163, under this tmux.conf in a throwaway
+container (an unusable API key to get past the login screen), `alt=1 mouse=1` with the default
+TUI and `alt=0 mouse=0` with scrollback chosen in `~/.codex/config.toml`. Re-take them logged in.
 
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`

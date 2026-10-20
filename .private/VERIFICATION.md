@@ -157,8 +157,10 @@ grep -qxF 'projects/*' .gitignore && echo gitignore-ok
 #   "projects", "projects/", "projects//" — never the literal line. The check never fired.
 # Containerfile layer order: node < gh < vercel < codex < claude-code, most volatile LAST.
 # Codex sits before Claude Code on cost, not taste: they are the two biggest layers in the file
-# (measured with `podman history`: codex 312 MB, Claude Code 298 MB), and Claude Code's pin is the
-# one most often moved, so it is the one whose bump should not drag the other along.
+# (measured with `podman history`: codex 312 MB, Claude Code 298 MB at codex 0.148 on x86_64;
+# codex 385 MB, Claude Code 286 MB at codex 0.163 and Claude Code 2.1.303 on arm64), and the order
+# keeps a Claude Code bump from dragging codex along. It is right while Claude Code is bumped at
+# least ~0.74x as often as codex; the Containerfile's layer 7 note has the arithmetic.
 grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$PRIV/Containerfile"
 ```
 
@@ -1360,8 +1362,9 @@ rather than printed (#85). *Expect* the popup immediately, its link a beat later
 the fuller account.
 
 **8.2 — `gh`, `vercel` and `codex` login.** `gh auth login`, then `vercel login`, then
-`codex login`. Codex's callback on `localhost:1455` needs nothing arranged for it, so try its
-browser flow before reaching for `--device-auth`. If the redirect flow completes, say so — that is
+`codex login`. Codex's callback on `127.0.0.1:1455` (it was `localhost:1455` before 0.158, and
+falls back to 1457 if 1455 is taken) needs nothing arranged for it, so try its browser flow before
+reaching for `--device-auth`. If the redirect flow completes, say so — that is
 the measurement #82 asks for, and the same question is open for the other two.
 *Expect:* all three complete with a printed URL or emailed code. During `gh auth login`, answer
 **yes** to "Authenticate Git with your GitHub credentials?" and then confirm `git push` works from

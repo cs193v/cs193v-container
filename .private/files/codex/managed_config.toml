@@ -11,6 +11,14 @@
 # upstream default that moves, and it puts the course's posture in one readable file instead of
 # leaving a reader to infer it from an absence.
 #
+# THIS FILE IS ENFORCED, NOT A SET OF DEFAULTS (#529). Codex ranks managed_config.toml above the
+# student's own ~/.codex/config.toml and above `-c` flags, and re-reads each key here as a
+# requirement (`config/src/loader/mod.rs`, the same at 0.148 and 0.163). The one give is
+# approvals_reviewer: `auto_review` also allows `user`, so a student can opt out of the reviewer.
+# This header called these "managed DEFAULTS" until #529 measured otherwise. So ANY key added here
+# is a pin -- a default a student should be able to change belongs in /etc/codex/config.toml,
+# codex's lowest layer, and nothing is shipped there.
+#
 #   sandbox_mode = "workspace-write"
 #       The boundary. Codex may read anywhere and write inside the workspace; anything further
 #       is an escalation it has to ask about. On Linux this is enforced with bubblewrap, which
@@ -18,8 +26,8 @@
 #       hold inside rootless podman, and what codex does when it cannot get one.
 #
 #   approval_policy = "on-request"
-#       WHEN codex stops to ask: when it wants out of the sandbox. Not "untrusted", which asks
-#       about everything outside a built-in trusted set.
+#       WHEN codex stops to ask: when it wants out of the sandbox. The other values left since
+#       0.149 retired "untrusted" are "never" and a granular table.
 #
 #   approvals_reviewer = "auto_review"
 #       WHO answers. `user` is the default and puts the question to the student; `auto_review`
@@ -30,11 +38,16 @@
 #       starting mode, auto (#526).
 #
 # What is deliberately ABSENT:
-#   requirements.toml     - no HARD constraints are shipped. These are managed DEFAULTS, and a
-#                           student who edits ~/.codex/config.toml can still move them. Making
-#                           them unmovable is a separate decision, and the precedence between a
-#                           managed default and a student's own config is not something the
-#                           reference states -- see the staff README.
+#   requirements.toml     - not needed for these three, which this file already enforces (above).
+#                           It would only matter for constraining a key this file does not name;
+#                           #550 is one such key.
+#   features.daemon_auto_start
+#                         - codex's background server (0.157+) is left on, as any npm user gets
+#                           it, and it follows OpenAI's latest release on its own. Setting it here
+#                           would be a pin, not a default. See the staff README's "Codex's
+#                           background server".
+#   [tui]                 - the fullscreen TUI (codex's default since 0.157) is accepted but not
+#                           written down: here it would take /tui -> Scrollback away from students.
 #   [sandbox_workspace_write] and default_permissions
 #                         - the reference says not to combine either with sandbox_mode.
 #   MCP configuration     - none shipped, and not locked down either, matching Claude Code.

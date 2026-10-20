@@ -1461,11 +1461,17 @@ record    "codex:version" "$codex_version"
 codex_want="$(sed -n 's/^ARG CODEX_VERSION=\(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
 assert_eq "codex:installed-version-matches-the-pin" "${codex_want:-NO-PIN-IN-CONTAINERFILE}" \
           "$(printf '%s\n' "$codex_version" | awk '{ print $NF }')"
-# System bubblewrap. NOT a sandbox assertion: no sandbox policy is shipped, and Anthropic's own
-# docs say bwrap cannot mount a fresh /proc in an unprivileged container. This is here because
-# without the package codex prints "could not find system bubblewrap ... install bubblewrap with
-# your package manager" at EVERY start, and a student can act on that advice with sudo and lose it
-# again at the next --rebuild.
+# NOTHING THE BUILD RAN IS LEFT IN ~/.codex. It is the cs193v-codex volume's mount target, and
+# podman copies an image's content into an EMPTY named volume on first mount -- so anything here
+# is seeded into every student's volume once and never refreshed. Not hypothetical: layer 7's
+# `codex --version` left ~/.codex/tmp/arg0/ behind at 0.148 and ~/.codex/tmp/arg0-linux/ at 0.163,
+# both symlinks into that image's own copy of the binary.
+assert_eq "img:codex-home-is-empty" "" "$(R 'find /home/student/.codex -mindepth 1')"
+# System bubblewrap. NOT a sandbox assertion: Anthropic's own docs say bwrap cannot mount a fresh
+# /proc in an unprivileged container, and #527 measured it failing on macOS hosts. This is here
+# because without the package codex warns "Codex could not find bubblewrap on PATH. Install
+# bubblewrap with your OS package manager." at start, and a student can act on that advice with
+# sudo and lose it again at the next --rebuild.
 assert_ok "codex:system-bwrap-is-present" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'bwrap --version'"
 
@@ -1479,10 +1485,10 @@ assert_ok "codex:managed-policy-parses-in-the-image" \
 # source, which is strictly more than the static version could see: it covers the Containerfile's
 # install step too.
 #
-# Two reasons this is asserted rather than recorded. First, codex SILENTLY IGNORES a key it does
-# not recognise -- verified against the real binary: a bogus key leaves `codex doctor` reporting
-# "config loaded" with no warning at all -- so a typo is a policy that does nothing and says
-# nothing. Second, the reference says not to combine sandbox_mode with `default_permissions` or
+# Two reasons this is asserted rather than recorded. First, a typo is a policy that does nothing:
+# codex skips a key it does not recognise. At 0.148 it did so in SILENCE; since 0.155 doctor warns
+# about it, and codex:shipped-policy-has-no-ignored-keys below holds that line too. Second, the
+# reference says not to combine sandbox_mode with `default_permissions` or
 # `[sandbox_workspace_write]`, and an exact key set is what keeps either from arriving later
 # without anyone noticing. On the PARSED keys rather than by grepping, because the file's own
 # comments name both of those.
@@ -1522,20 +1528,58 @@ assert_contains "codex:doctor-reports-the-shipped-approval-policy" "OnRequest" \
                 "$(R 'codex doctor 2>&1 | grep -e approval.policy')"
 
 # THE CONTROL. A managed file that says something DIFFERENT must change what doctor reports; if it
-# does not, /etc/codex is not being read and the assertion above means nothing. Verified by hand
-# before it was written here: untrusted surfaces as UnlessTrusted.
+# does not, /etc/codex is not being read and the assertion above means nothing. `never` and not
+# `read-only` (#529's suggestion): doctor reports `filesystem sandbox restricted` for both sandbox
+# modes, so that probe could not fail. It was `untrusted` -> UnlessTrusted until 0.149 retired the
+# value, which now makes doctor report "config could not be loaded" instead (measured at 0.163).
 codex_probe="$(new_tmpdir)"
-printf 'approval_policy = "untrusted"\n' > "$codex_probe/managed_config.toml"
-assert_contains "codex:the-managed-policy-is-really-read" "UnlessTrusted" \
+printf 'approval_policy = "never"\n' > "$codex_probe/managed_config.toml"
+assert_contains "codex:the-managed-policy-is-really-read" "Never" \
     "$($VT_RUN --rm --network=none -v "$codex_probe/managed_config.toml:/etc/codex/managed_config.toml:ro$VT_MOUNT_Z" \
        --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1 | grep -E "approval policy"' 2>&1)"
+
+# THE FILE IS A PIN, NOT A DEFAULT (#529). Codex ranks managed_config.toml ABOVE the student's own
+# ~/.codex/config.toml and above -c flags, and re-reads its keys as requirements. So a student's
+# config that loosens both keys must leave doctor where the course put it. Mounting the student's
+# file read-only is enough: doctor only reads it.
+printf 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n' > "$codex_probe/config.toml"
+assert_eq "codex:student-config-cannot-loosen-the-policy" "OnRequest restricted" \
+    "$($VT_RUN --rm --network=none -v "$codex_probe/config.toml:/home/student/.codex/config.toml:ro$VT_MOUNT_Z" \
+       --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1' 2>&1 \
+       | awk '$1 == "approval" && $2 == "policy" { a = $3 } $1 == "filesystem" && $2 == "sandbox" { f = $3 }
+              END { print a, f }')"
+
+# NO KEY IN THE SHIPPED FILE IS IGNORED. Since 0.155 codex names an unrecognised key instead of
+# skipping it in silence, so an upstream rename of one of the three now shows up here -- including
+# approvals_reviewer, which nothing else can see. The control is what makes the absence mean
+# something: the same three keys plus a bogus one must produce the warning.
+codex_ignored="Codex is ignoring"
+codex_doctor="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1' 2>&1)"
+assert_not_contains "codex:shipped-policy-has-no-ignored-keys" "$codex_ignored" "$codex_doctor"
+{ cat "$PRIVATE/files/codex/managed_config.toml"; printf 'cs193v_bogus_key = true\n'; } \
+    > "$codex_probe/managed_config.toml"
+assert_contains "codex:a-bogus-policy-key-is-reported" "$codex_ignored" \
+    "$($VT_RUN --rm --network=none -v "$codex_probe/managed_config.toml:/etc/codex/managed_config.toml:ro$VT_MOUNT_Z" \
+       --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1' 2>&1)"
+
+# FULLSCREEN IS CODEX'S DEFAULT SINCE 0.157, AND THE COURSE TAKES IT RATHER THAN PINNING IT. Not in
+# managed_config.toml, deliberately: that file outranks the student's own config (above), so a TUI
+# key there would take `/tui` -> Scrollback away from them. So this asserts the UPSTREAM default,
+# which can only move at a bump -- and this is what notices when it does. The control puts the
+# other value in /etc/codex/config.toml, the system layer below the student's own config, which
+# also proves that layer is read in case the course ever needs a real default.
+assert_match "codex:fullscreen-tui-is-the-default" 'configured TUI mode +fullscreen' "$codex_doctor"
+printf '[tui]\nfullscreen_transcript = false\n' > "$codex_probe/config.toml"
+assert_match "codex:the-system-config-layer-is-read" 'configured TUI mode +scrollback' \
+    "$($VT_RUN --rm --network=none -v "$codex_probe/config.toml:/etc/codex/config.toml:ro$VT_MOUNT_Z" \
+       --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1' 2>&1)"
 rm -rf "$codex_probe"
 
 # approvals_reviewer is NOT asserted here, and that is a limitation rather than an oversight:
-# `codex doctor`, even with --all, never names the reviewer, so nothing in this suite can tell
-# `user` from `auto_review`. Only a live escalation shows who answers it -- MANUAL.md carries that
-# check. Worth knowing because codex ignores unknown keys in silence, so a future rename of this
-# key would leave the course shipping a setting that does nothing.
+# `codex doctor`, even with --all, never names the reviewer (re-checked at 0.163), so nothing in
+# this suite can tell `user` from `auto_review`. Only a live escalation shows who answers it --
+# MANUAL.md carries that check. codex:shipped-policy-has-no-ignored-keys does catch the key being
+# renamed upstream; it cannot catch it being honoured differently.
 
 # ─── Claude Code ───────────────────────────────────────────────────────────────
 # ONE CONTAINER FOR THE SHIPPED IMAGE'S CLAUDE: its version line, then `claude doctor`'s report,

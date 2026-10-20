@@ -134,7 +134,8 @@
 # ─── Persistent state ──────────────────────────────────────────────────────────
 # Six volumes holding logins and settings, and ONE holding a package cache. That last one is
 # an exception to a rule this file used to state flatly, so here is the rule and why the
-# exception earns it.
+# exception earns it. (A second exception arrived uninvited with codex 0.157, inside the codex
+# volume; see the note beside it.)
 #
 # The rule: no package caches. node_modules lives on the bind mount and survives a rebuild
 # anyway, so caching it would not make --rebuild cheap — and a persisted cache would survive
@@ -161,6 +162,13 @@
 # is no narrower option: a single file cannot be a volume target, and the ~/.claude.json symlink
 # trick does not transfer, because codex rewrites its auth file and an atomic replace would swap
 # the symlink for a real file in the writable layer -- a login silently lost at the next --rebuild.
+#
+# SINCE CODEX 0.157 IT ALSO HOLDS A PACKAGE, and that is the second exception to the rule above.
+# The first interactive `codex` copies the whole package (~370-430 MB) into packages/ and runs its
+# background server from there, and that copy updates itself to OpenAI's latest release, keeping
+# every old one (757 MB after a single update, measured). So it survives the --rebuild the rule
+# exists to protect, and grows. Accepted and documented rather than prevented (#571); the staff
+# README's "Codex's background server" has the reasons. --rebuild --logout clears it.
 #
 # The course notes are deliberately NOT in here. ~/.codex/AGENTS.md is a symlink the entrypoint
 # points at /etc/cs193v/agent-notes.md on every start, so an image update reaches a student whose
