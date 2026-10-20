@@ -302,17 +302,23 @@ pid_pgid() {                          # pid_pgid PID
 # signal it would take the run down with it. A ZOMBIE IS GONE: it holds a pid until it is reaped,
 # not a process anybody can still be talking to. Read the group BEFORE the key, while a pid is still
 # there to read it from.
+PT_OWN_PGID=''
 pgid_empty() {                        # pgid_empty PGID
-    local rows
+    local rc
     case "${1:-}" in
         ''|*[!0-9]*) printf 'pgid_empty: not a process group: [%s]\n' "${1:-}" >&2; return 2 ;;
     esac
-    if [ "$1" = "$(pid_pgid $$)" ]; then
+    # Our own group asked once per suite, not once per poll: it is the same answer every time.
+    [ -n "$PT_OWN_PGID" ] || PT_OWN_PGID="$(pid_pgid $$)"
+    if [ "$1" = "$PT_OWN_PGID" ]; then
         printf 'pgid_empty: %s is this suite'\''s own process group\n' "$1" >&2; return 2
     fi
-    rows="$(ps -A -o pgid= -o stat= 2>/dev/null)"
-    [ -n "$rows" ] || { printf 'pgid_empty: ps listed nothing\n' >&2; return 2; }
-    printf '%s\n' "$rows" | do_awk -v g="$1" '$1 == g && $2 !~ /^Z/ { live = 1 } END { exit live ? 1 : 0 }'
+    # One ps, read once. A listing with nothing in it is a ps that failed -- this suite is in it.
+    ps -A -o pgid= -o stat= 2>/dev/null \
+        | do_awk -v g="$1" '$1 == g && $2 !~ /^Z/ { live = 1 } END { exit NR == 0 ? 2 : (live ? 1 : 0) }'
+    rc=$?
+    [ "$rc" -ne 2 ] || printf 'pgid_empty: ps listed nothing\n' >&2
+    return "$rc"
 }
 
 # kill_if_argv PID ARGV [SIGNAL] -> signals PID only while its command line is exactly ARGV.

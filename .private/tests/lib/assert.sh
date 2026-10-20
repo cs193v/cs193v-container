@@ -210,21 +210,22 @@ actual:                    $3" ;;
 # it — and die() prefixes every line with ┃. Flatten the box art and collapse whitespace
 # before matching, so a test asserts on what the student reads rather than on where the
 # line happens to break.
+# THE BOX'S GLYPHS, one sed expression each, shared by _flatten and unbox. EACH IS ITS OWN STRING,
+# not a [bracket]: a C locale reads a bracket of multibyte glyphs as a set of bytes, and deletes
+# those bytes out of anything else that carries them -- an é in a hostile path among them.
+BOX_GLYPHS_SED=(-e 's/┃//g' -e 's/┏//g' -e 's/┓//g' -e 's/┗//g' -e 's/┛//g' -e 's/━//g')
 _flatten() {
     printf '%s' "$1" \
         | do_tr '\n' ' ' \
-        | sed -e 's/[┃┏┓┗┛━]//g' -e 's/[[:space:]][[:space:]]*/ /g'
+        | sed ${BOX_GLYPHS_SED[@]+"${BOX_GLYPHS_SED[@]}"} -e 's/[[:space:]][[:space:]]*/ /g'
 }
 
 # _flatten's other half: the box's decoration AND EVERY BIT OF WHITESPACE removed, for a needle a
 # wrap can split MID-TOKEN -- a path, a quoted podman line -- which _flatten's joining space would
 # leave split. Unbox both sides of the comparison. One definition, where there were four (#495
-# review): setup-git's sg_unwrap, 16's squash_ws, 30's squash and 31's unboxed. EACH GLYPH IS ITS OWN
-# STRING, not a [bracket]: a C locale reads a bracket of multibyte glyphs as a set of bytes, and
-# deletes those bytes out of anything else that carries them -- an é in a hostile path among them.
+# review): setup-git's sg_unwrap, 16's squash_ws, 30's squash and 31's unboxed.
 unbox() {                             # unbox TEXT -> TEXT, unboxed and with no whitespace at all
-    printf '%s' "$1" | sed -e 's/┃//g' -e 's/┏//g' -e 's/┓//g' -e 's/┗//g' -e 's/┛//g' -e 's/━//g' \
-        | do_tr -d '[:space:]'
+    printf '%s' "$1" | sed ${BOX_GLYPHS_SED[@]+"${BOX_GLYPHS_SED[@]}"} | do_tr -d '[:space:]'
 }
 
 assert_says() {                       # assert_says NAME PHRASE TEXT
