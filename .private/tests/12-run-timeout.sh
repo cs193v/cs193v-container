@@ -825,7 +825,9 @@ if nap_up "$RD_NAP"; then
 else
     pass "rt:detach-still-kills-the-command"
 fi
-assert_eq "rt:detach-says-nothing-of-its-own" "" "$(cat "$WORK/detach-quiet.err" 2>/dev/null)"
+# THROUGH run_checker (#559): the run above made the file with its own 2>, so a read that fails is
+# a failure, not a quiet detach.
+assert_eq "rt:detach-says-nothing-of-its-own" "" "$(run_checker cat "$WORK/detach-quiet.err")"
 # NOT FROM THE TERMINAL, on the branch where that is in its own hands. A job in a background group
 # that reads the terminal is stopped by SIGTTIN, and run_timeout then waits out its whole ceiling
 # for a command that is never coming back. The fifo branch's command starts inside a subshell,
