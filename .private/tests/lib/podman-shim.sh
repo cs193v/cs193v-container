@@ -313,10 +313,14 @@ launcher_fg_pid() {
 launcher_fg_ended() {                 # launcher_fg_ended SECS
     wait_until "$1" test -s "$FG_STATUS"
 }
-# 2>/dev/null BEFORE THE <, here and below: redirections apply left to right, so the other order
-# prints the shell's own "No such file or directory" -- into a FAIL's output, the one time a
-# launcher still running is being reported.
-launcher_fg_status() { do_tr -d '\n' 2>/dev/null < "$FG_STATUS"; }
+# 2>/dev/null BEFORE THE <, below: redirections apply left to right, so the other order prints the
+# shell's own "No such file or directory" -- into a FAIL's output, the one time a launcher still
+# running is being reported. Here an ABSENT file is that "not ended yet" and says nothing, and one
+# that is there but cannot be read is a failure rather than the same silence (#586).
+launcher_fg_status() {
+    [ -e "$FG_STATUS" ] || return 0
+    run_checker cat "$FG_STATUS" | do_tr -d '\n'
+}
 
 # Close the window: what a terminal does, and what 70-sighup.sh's close_window does -- WITHOUT its
 # wait, because a test that has held a podman call open has to let go of it while ptyrun is still

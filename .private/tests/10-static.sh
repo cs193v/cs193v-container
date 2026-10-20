@@ -5616,8 +5616,8 @@ assert_eq    "portwatch:its-cap-is-the-hosts" "$dyn_max" "$pw_max"
 # that moved under an unchanged handshake would work until a container had more listeners than the
 # smaller cap, and then end forwarding for the session. Moved with a new version instead, a mismatched
 # pair is refused at the handshake, on the first line. Pinned as a pair, so moving either says so.
-pw_proto="$(sed -n "s/^PW_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-portwatch")"
-dyn_proto="$(sed -n "s/^DYNPORTS_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-ui.sh")"
+pw_proto="$(run_checker sed -n "s/^PW_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-portwatch")"
+dyn_proto="$(run_checker sed -n "s/^DYNPORTS_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-ui.sh")"
 assert_eq    "portwatch:its-handshake-is-the-hosts" "$dyn_proto" "$pw_proto"
 if [ "$pw_proto/$pw_max" = "cs193v-portwatch 1/128" ]; then
     pass "portwatch:the-cap-moves-only-with-the-version"

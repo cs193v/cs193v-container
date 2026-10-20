@@ -1596,7 +1596,7 @@ fj_run /bin/sh -c 'echo "$$" > "$1"' sh "$WORK/fj.self"
 # NON-EMPTY FIRST: a pid never published and a command that never wrote one are equal, and empty.
 assert_ne "fgjob:a-pid-was-published" "" "$FJ_PID"
 assert_eq "fgjob:the-published-pid-is-the-commands-own" \
-          "$(do_tr -d ' \n' 2>/dev/null < "$WORK/fj.self")" "$FJ_PID"
+          "$(run_checker cat "$WORK/fj.self" | do_tr -d ' \n')" "$FJ_PID"
 
 # ─── the shim's signal-test helpers refuse what would measure nothing (#449) ───
 # Three things 30-launcher-shim.sh's signal groups lean on, each of which goes wrong in silence:
