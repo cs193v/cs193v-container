@@ -419,6 +419,23 @@ assert_eq "rt:slow-ticks-still-reach-the-ceiling" "124" "$RC"
 if [ "$took" -le 6 ]; then pass "rt:slow-ticks-do-not-stretch-the-ceiling"
 else fail "rt:slow-ticks-do-not-stretch-the-ceiling" "a 3 s ceiling took ${took}s"; fi
 
+# ...BUT A CLOCK THAT JUMPS IS NOT TIME THE CALL SPENT (#495 review). SECONDS is the wall clock, so a
+# lid closed for an hour reads as an hour waited, and the time limit alone killed a healthy call the
+# moment the laptop woke. Modelled by the fifth tick's sleep moving SECONDS on an hour; the call must
+# still finish. In a ( ) so the moved clock and the shadow stay in there.
+rc="$( n=0
+       sleep() { command sleep "$@"; n=$((n + 1)); [ "$n" -ne 5 ] || SECONDS=$((SECONDS + 3600)); }
+       RT_SPIN='working'; run_timeout 5 sh -c 'sleep 2' >/dev/null 2>&1; printf '%s' "$?" )"
+assert_eq "rt:a-clock-jump-does-not-end-the-wait" "0" "$rc"
+
+# THE LATER LABEL IS TIME TOO, for the ceiling's reason: on ticks it ran late on a loaded machine, and
+# on ticks three times too long it never came at all. Here a tick is half a second, so the tick rule
+# needs five seconds to reach RT_SPIN_AT=1 and the command is gone at four.
+lt="$( sleep() { command sleep 0.5; }
+       RT_SPIN='first label'; RT_SPIN_AT=1; RT_SPIN_LATER='second label'
+       run_timeout 10 sh -c 'sleep 4' )"
+assert_eq "rt:the-later-label-shows-on-slow-ticks" "1" "$(printf '%s\n' "$lt" | grep -cxF 'second label')"
+
 # ON A TERMINAL the row is redrawn in place, and a shorter second label must not leave the tail of
 # the longer first one behind -- the row a student reads afterwards is the label in effect at the
 # end, and nothing else. A SCRIPT FILE AND ITS PATHS IN THE ENVIRONMENT, so that nothing a pty's shell
@@ -466,6 +483,20 @@ case "$widest" in
 esac
 # ...AND THE WHOLE OF IT IS LEFT ON SCREEN AT THE END, where it is printed once and may wrap.
 assert_contains "rt:a-wide-label-is-printed-whole-when-the-wait-ends" "$LONGLBL" "$lt"
+
+# term_cols WITH NO TERMINAL TO ASK SAYS 80 AND NOTHING ELSE (#495 review). `stty size </dev/tty
+# 2>/dev/null` opens /dev/tty before its stderr is redirected, so a process with no controlling
+# terminal printed bash's own "Device not configured" over the spinner row. A new session is the
+# no-terminal case: python forks first, since a group leader cannot setsid.
+cat > "$WORK/no-ctty.sh" <<'SUBJECT'
+. "$TC_UI"
+term_cols
+SUBJECT
+tc_out="$(TC_UI="$PRIVATE/files/cs193v-ui.sh" "$DO_PY" -c 'import subprocess, sys
+sys.exit(subprocess.run(["bash", sys.argv[1]], start_new_session=True).returncode)' \
+          "$WORK/no-ctty.sh" 2>"$WORK/no-ctty.err")"
+assert_eq "rt:term-cols-without-a-terminal-says-80" "80" "$tc_out"
+assert_eq "rt:term-cols-is-silent-without-a-terminal" "" "$(cat "$WORK/no-ctty.err")"
 
 # ─── and reading a version out of what it captured ─────────────────────────────
 # HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces and the launcher reads
