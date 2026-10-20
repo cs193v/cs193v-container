@@ -1718,7 +1718,7 @@ vm_detached() {                       # vm_detached NAME TRANSCRIPT
     snap="$(vm_snap)"; vp="$(vm_pid)"
     assert_contains "$name:the-vm-ignores-sighup" "HUP=IGNORE" "$snap"
     assert_contains "$name:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
-    assert_eq "$name:the-vm-inherited-no-fd-above-2" "" "$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
+    assert_eq "$name:the-vm-inherited-no-fd-above-2" "" "$(died_in "$snap"; printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
     assert_ne "$name:the-vm-is-not-in-the-installers-group" "$(sid_of "$vp")" "$(pid_pgid "$vp")"
     assert_not_contains "$name:no-job-control-complaint" "job control" "$out"
 }

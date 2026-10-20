@@ -494,7 +494,7 @@ term_cols
 SUBJECT
 tc_out="$(CS193V_UI="$PRIVATE/files/cs193v-ui.sh" "$DO_PY" "$PT_LIB/nosid.py" bash "$WORK/no-ctty.sh" 2>"$WORK/no-ctty.err")"
 assert_eq "rt:term-cols-without-a-terminal-says-80" "80" "$tc_out"
-assert_eq "rt:term-cols-is-silent-without-a-terminal" "" "$(cat "$WORK/no-ctty.err")"
+assert_eq "rt:term-cols-is-silent-without-a-terminal" "" "$(run_checker cat "$WORK/no-ctty.err")"
 
 # ─── and reading a version out of what it captured ─────────────────────────────
 # HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces and the launcher reads

@@ -223,7 +223,7 @@ if wait_until 10 eval '[ "$(vm_state)" = starting ]'; then
     launch_rc; rc=$?
     assert_eq "b1:starts-nothing-of-its-own"   "$before" "$(starts)"
     assert_eq "b1:carries-on-once-it-is-up"    "1" "$(created)"
-    assert_says_not_key "b1:no-refusal"        err.machine-still-starting "$(cat "$SHIM/l.out")"
+    assert_says_not_key "b1:no-refusal"        err.machine-still-starting "$(run_checker cat "$SHIM/l.out")"
 else
     fail "b1:says-it-is-waiting" "the other start never reached 'starting'"
 fi
@@ -238,7 +238,7 @@ if wait_until 15 grep -q '^machine start' "$SHIM/argv.log"; then
     vm_set running
     release_start_lock
     launch_rc; rc=$?
-    l_out="$(cat "$SHIM/l.out")"
+    l_out="$(run_checker cat "$SHIM/l.out")"
     assert_eq           "b2:tried-to-start-once"             "1" "$(starts)"
     assert_says_key     "b2:already-running-means-waiting"   status.waiting-machine "$l_out"
     assert_says_not_key "b2:not-a-start-failure"             err.machine-start-failed "$l_out"
@@ -256,7 +256,7 @@ shim_set machine_start_delay 2
 launcher > "$SHIM/b3.1" 2>&1 & p1=$!
 launcher > "$SHIM/b3.2" 2>&1 & p2=$!
 wait "$p1" 2>/dev/null; wait "$p2" 2>/dev/null
-o1="$(cat "$SHIM/b3.1")"; o2="$(cat "$SHIM/b3.2")"
+o1="$(run_checker cat "$SHIM/b3.1")"; o2="$(run_checker cat "$SHIM/b3.2")"
 assert_eq "b3:the-vm-ends-up-running" "running" "$(vm_state)"
 n="$(starts)"
 if [ "$n" -ge 1 ] && [ "$n" -le 2 ]; then pass "b3:at-most-one-start-each"
@@ -314,7 +314,7 @@ if wait_until 15 grep -q '^machine start' "$SHIM/argv.log"; then
     if wait_until 15 said "$WAITING" "$SHIM/l.out"; then
         vm_set stopped
         launch_rc
-        l_out="$(cat "$SHIM/l.out")"
+        l_out="$(run_checker cat "$SHIM/l.out")"
         assert_eq           "b6:starts-it-itself-after-the-other-start-fails" "2" "$(starts)"
         assert_eq           "b6:and-carries-on"                               "1" "$(created)"
         assert_says_not_key "b6:without-calling-it-unreachable" err.machine-unreachable "$l_out"
@@ -716,7 +716,7 @@ exec 7>&-
 wait "$g8pid" 2>/dev/null
 # Proving an absence: the leader has exited, and its hangup has had time to land.
 sleep 2
-g8="$(cat "$PTY_OUT")"
+g8="$(run_checker cat "$PTY_OUT")"
 assert_ne           "g8:the-vm-was-up-to-begin-with"       "" "$vm0"
 assert_says_key     "g8:doctor-reports-the-clock-problem"  doctor.row.clock "$g8"
 assert_says_key     "g8:and-says-how-to-fix-it"            doctor.clock.fix "$g8"
@@ -832,7 +832,7 @@ if wait_until 10 vm_alive; then
     assert_contains "i1:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
     # NOTHING ABOVE 2. The helper closes every fd it finds, so the VM inherits none at all -- not
     # 3..9 by name, which is what let bash's saved copies of 7 and 8 through as 12 and 13.
-    assert_eq "i1:the-vm-inherited-no-fd-above-2" "" "$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
+    assert_eq "i1:the-vm-inherited-no-fd-above-2" "" "$(died_in "$snap"; printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
     vp="$(vm_pid)"
     assert_ne "i1:the-vm-is-not-in-the-launchers-group" "$(pid_pgid $$)" "$(pid_pgid "$vp")"
     assert_eq "i1:but-is-in-the-same-session"           "$(sid_of $$)"  "$(sid_of "$vp")"
@@ -975,8 +975,9 @@ PATH="$SHIM:$PATH" do_script 20 \
     "cd $(sh_quote "$SHIM") && $(sh_quote bash -c '. "$1"; machine_start_detached; echo helper-rc=$?' _ "$COPY/.private/files/cs193v-ui.sh")" \
     </dev/null > "$SHIM/i11.out" 2>&1
 assert_eq           "i11:a-direct-call-on-a-terminal-starts-the-vm" "running" "$(vm_state)"
-assert_contains     "i11:and-returns-podmans-status"                "helper-rc=0" "$(cat "$SHIM/i11.out")"
-assert_not_contains "i11:podman-was-never-asked-a-question" "default system connection" "$(cat "$SHIM/i11.out")"
+i11="$(run_checker cat "$SHIM/i11.out")"
+assert_contains     "i11:and-returns-podmans-status"                "helper-rc=0" "$i11"
+assert_not_contains "i11:podman-was-never-asked-a-question" "default system connection" "$i11"
 # NO nohup.out WHERE IT RAN. Handed a terminal on stdout, nohup writes one into the current
 # directory -- a student's course folder -- and the helper's guard is what stops it.
 assert_no_file      "i11:no-nohup-out-left-where-it-ran"    "$SHIM/nohup.out"
@@ -992,7 +993,8 @@ direct_with_fd9() {                   # direct_with_fd9 DIR
 }
 direct_with_fd9 "$COPY"
 if wait_until 10 vm_alive; then
-    assert_eq "i12:a-direct-call-hands-the-vm-no-fd" "" "$(vm_snap | sed -n 's/.*fds=//p')"
+    snap="$(vm_snap)"
+    assert_eq "i12:a-direct-call-hands-the-vm-no-fd" "" "$(died_in "$snap"; printf '%s\n' "$snap" | sed -n 's/.*fds=//p')"
     assert_eq "i12:and-the-callers-fd-9-reaches-eof" "" "$(held_open 5 9)"
 else
     fail "i12:a-direct-call-hands-the-vm-no-fd" "no fake VM came up: $(cat "$SHIM/i12.log" 2>/dev/null)"
