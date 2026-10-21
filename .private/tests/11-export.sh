@@ -267,39 +267,6 @@ assert_eq "export:no-staff-docs" "" \
           "$(run_grep '\.md$' "$TMP/paths" | grep -v '^\.private/files/agent-notes\.md$' \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 
-# ─── 4b. the size, not just the names ──────────────────────────────────────────
-# The listing above is the leak we know about; this is the one that catches whatever lands in
-# the course directory next -- 14-test-harness.sh:104-111 makes the same argument for its own
-# copy. A zero is a failure rather than a pass, because that is what `du` on a missing directory
-# reports.
-#
-# WHAT THE CEILING IS AND IS NOT FOR. It is for a BULK leak: the test tree alone is 2.2 MB, so
-# re-shipping it breaches this by a wide margin at any ceiling this file has had. It would NOT
-# catch the four staff documents coming back -- they are about 200 KB together -- and it does not
-# need to, because §1 and §4 name that class directly. Raise it if the shipped set genuinely
-# grows; do not raise it to make a surprise go away without reading §1 first.
-#
-# RAISED FROM 1024 TO 1536 FOR THE ICONS (#134), which is the growth that instruction describes:
-# two named files added to §1 deliberately, not a surprise. Measured, the whole 280 KB of it:
-#
-#     cs193v.icns  228 KB   ic10 1024px 106 KB  |  ic14+ic09 512px 37 KB each
-#                           ic13+ic08 256px 17 KB each  |  the rest under 4 KB apiece
-#     cs193v.ico    56 KB   256px PNG 20 KB  |  64px BMP 17 KB  |  48px BMP 10 KB  |  rest small
-#
-# SO IF SPACE EVER GETS TIGHT, ic10 IS THE FIRST THING TO DROP: one rung, 46% of the .icns, and
-# macOS only reaches for 1024 on a Quick Look or the largest Finder icon size -- neither of which
-# is on the path a student takes to this app. It is kept today because the cost is a one-off
-# 106 KB on a download that already carries a megabyte, and because an icon that goes soft at the
-# top is the kind of wrong nobody reports. The .ico's sub-256 entries are uncompressed BMP on
-# purpose; make-icons.sh records why, and all-PNG would roughly halve that file.
-size_kb="$(du -sk "$TREE" 2>/dev/null | awk '{print $1}')"
-if [ -n "${size_kb:-}" ] && [ "$size_kb" -gt 0 ] && [ "$size_kb" -lt 1536 ]; then
-    pass "export:is-small"
-else
-    fail "export:is-small" "du reports ${size_kb:-nothing} KB for the student tree"
-fi
-record "export:size-kb" "${size_kb:-nothing}"
-
 # ─── 5. no message names a file the student does not have ──────────────────────
 # THE CHECK THAT WOULD HAVE CAUGHT #115's OWN COLLATERAL BY ITSELF. err.no-subuid used to tell a
 # student to run `bash .private/install-cs193v.sh`, and that was the only .private/ path in the

@@ -234,9 +234,9 @@ nl='
 '
 badname="$( (cd "$probe" && find . -name "*$nl*" -print) )"
 rm -rf "$probe"
-# AN IMPLAUSIBLY SMALL EXPORT SET, following 11-export.sh's own size guard: every comparison below
-# is satisfied by an empty tree in one direction or another, and a .gitattributes mistake that
-# excluded everything would otherwise publish the digest of almost nothing.
+# AN IMPLAUSIBLY SMALL EXPORT SET: every comparison below is satisfied by an empty tree in one
+# direction or another, and a .gitattributes mistake that excluded everything would otherwise
+# publish the digest of almost nothing.
 [ "$n_files" -gt 10 ] || die "the export set holds only $n_files files, which cannot be right.
   Check .gitattributes before publishing a digest for it."
 [ -z "$odd" ] || die "what would ship contains something that is not a file or a directory:
