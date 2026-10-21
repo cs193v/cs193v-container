@@ -355,9 +355,9 @@ assert_eq   "release:a-symlink-in-the-export-is-refused" "1" "$(rel_rc)"
 assert_unwritten "release:a-symlink-writes-nothing"
 assert_says "release:that-refusal-names-the-symlink" "link-to-somewhere" "$out"
 
-# AN EXPORT SET THAT CANNOT BE RIGHT, following 11-export.sh's own size guard: a .gitattributes
-# mistake that excluded everything would otherwise publish the digest of almost nothing, and every
-# comparison downstream is satisfied by an empty tree in one direction or the other.
+# AN EXPORT SET THAT CANNOT BE RIGHT: a .gitattributes mistake that excluded everything would
+# otherwise publish the digest of almost nothing, and every comparison downstream is satisfied by
+# an empty tree in one direction or the other.
 reset_case
 printf '* export-ignore\n' > "$CASE/.gitattributes"
 gitq commit -qam ignore-everything >/dev/null 2>&1

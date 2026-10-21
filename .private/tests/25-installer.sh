@@ -4514,7 +4514,7 @@ assert_file "applet:icon-is-in-resources"  "$MACAPP/Contents/Resources/cs193v.ic
 assert_exec "applet:helper-is-in-resources" "$MACAPP/Contents/Resources/cs193v-run"
 assert_file "applet:script-is-compiled"    "$MACAPP/Contents/Resources/Scripts/main.scpt"
 # AND NOT osacompile's DROPLET ASSETS: Assets.car is 375 KB of template UI this applet never
-# shows, and shipping it would mean raising the student tree's size ceiling to carry something
+# shows, and shipping it would put that in every student's download to carry something
 # nothing reads. Measured safe to drop -- the applet still runs and `display alert` still works.
 assert_no_file "applet:carries-no-droplet-assets" "$MACAPP/Contents/Resources/Assets.car"
 assert_no_file "applet:carries-no-template-icon"  "$MACAPP/Contents/Resources/applet.icns"

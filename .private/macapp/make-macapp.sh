@@ -110,9 +110,8 @@ rm -f "$APP/Contents/Resources/applet.icns"
 # an applet without Assets.car runs, runs again on relaunch, and `display alert` still works,
 # which is the only AppleScript UI this one uses. The seal is re-made below, after this.
 #
-# WHY IT IS WORTH THE LINE: the student tree has a size ceiling (11-export.sh), raised once
-# already for the icons. Keeping 375 KB of unused template assets would have meant raising it
-# again to ship something nothing reads.
+# WHY IT IS WORTH THE LINE: keeping it would put 375 KB of unused template assets in every
+# student's download, to ship something nothing reads.
 rm -f "$APP/Contents/Resources/Assets.car"
 
 # ─── 3b. strip extended attributes, because a staff Mac's are not a student's ──
